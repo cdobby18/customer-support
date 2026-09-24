@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useState } from "react";
-import { Activity, ArrowRight, Check, CircleAlert, Inbox, LogOut, MessageSquare, Plus, RefreshCw, Search, ShieldAlert, ShieldCheck, UserCog, UserRound, Gavel, AlertTriangle, Clock, CheckCircle2, XCircle, FileText, Eye, ChevronLeft, ChevronRight, Trash2, BarChart3, Gauge, Timer, Star, TrendingUp, Users, Hash } from "lucide-react";
+import { Activity, ArrowRight, Check, CircleAlert, Inbox, LogOut, MessageSquare, Plus, RefreshCw, Search, ShieldAlert, ShieldCheck, UserCog, UserRound, Gavel, AlertTriangle, Clock, CheckCircle2, XCircle, FileText, Eye, ChevronLeft, ChevronRight, Trash2, BarChart3, Gauge, Timer, Star, TrendingUp, Users, Hash, Sparkles } from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -64,8 +64,8 @@ function AuthScreen({ onAuthenticated }) {
       <section className="auth-intro">
         <div className="brand-mark"><span>R</span></div>
         <p className="eyebrow">Relay / support operations</p>
-        <h1>Make every customer feel heard.</h1>
-        <p className="intro-copy">A calm, intelligent workspace for resolving the conversations that matter.</p>
+        <h1>Where conversations become resolutions.</h1>
+        <p className="intro-copy">Understand faster. Act smarter. Resolve better.</p>
         <div className="signal-row"><ShieldCheck size={17} /> Human oversight built into every escalation.</div>
       </section>
       <section className="auth-panel">
@@ -79,7 +79,7 @@ function AuthScreen({ onAuthenticated }) {
         <h2>{mode === "login" ? "Enter your workspace" : "Start a support workspace"}</h2>
         <p className="muted">{mode === "login" ? "Sign in to continue to your queue." : "New accounts begin with customer access."}</p>
         <form onSubmit={submit} className="auth-form">
-          <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" required /></label>
+          <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="user@gmail.com" required /></label>
           <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" minLength="8" required /></label>
           {error && <div className="error-box"><CircleAlert size={16} /> {error}</div>}
           <button className="primary-button" disabled={loading}>{loading ? "Working..." : mode === "login" ? "Open support desk" : "Create account"}<ArrowRight size={17} /></button>
@@ -480,6 +480,197 @@ function EscalationReviewPanel({ session }) {
   );
 }
 
+function AiDraftPanel({ session }) {
+  const [tickets, setTickets] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [autoResult, setAutoResult] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [drafting, setDrafting] = useState(false);
+  const [autoRunning, setAutoRunning] = useState(false);
+  const [notice, setNotice] = useState("");
+
+  const selectedTicket = tickets.find((ticket) => ticket.id === selectedId) || null;
+
+  async function loadTickets() {
+    setLoading(true);
+    try {
+      const result = await apiRequest("/tickets", {}, session.access_token);
+      const draftable = result.filter((ticket) => ticket.status !== "closed");
+      setTickets(draftable);
+      if (!selectedId && draftable.length) setSelectedId(draftable[0].id);
+    } catch (error) { setNotice(error.message); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { loadTickets(); }, []);
+
+  useEffect(() => { setDraft(null); setAutoResult(null); }, [selectedId]);
+
+  async function generateDraft() {
+    if (!selectedTicket) return;
+    setDrafting(true);
+    setNotice("");
+    try {
+      const result = await apiRequest(`/tickets/${selectedTicket.id}/response-draft`, { method: "POST" }, session.access_token);
+      setDraft(result);
+    } catch (error) { setNotice(error.message); }
+    finally { setDrafting(false); }
+  }
+
+  async function runAutoRespond() {
+    if (!selectedTicket) return;
+    setAutoRunning(true);
+    setNotice("");
+    try {
+      const result = await apiRequest(`/tickets/${selectedTicket.id}/auto-respond`, { method: "POST" }, session.access_token);
+      setAutoResult(result);
+      if (result.draft) setDraft({ ...result.draft, ticket_id: selectedTicket.id });
+      await loadTickets();
+    } catch (error) { setNotice(error.message); }
+    finally { setAutoRunning(false); }
+  }
+
+  return (
+    <section className="ai-draft-panel">
+      <div className="team-heading">
+        <div>
+          <p className="eyebrow">Response Agent</p>
+          <h2><Sparkles size={19} /> AI reply drafts</h2>
+          <p className="muted">Generate KB-grounded draft replies with citations, confidence scoring, and guardrail checks.</p>
+        </div>
+        <span>{drafting ? "generating..." : `${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`}</span>
+      </div>
+      {notice && <div className="team-notice">{notice}</div>}
+      <div className="review-grid">
+        <div className="review-list-column">
+          {loading ? (
+            <div className="empty-state">Loading tickets...</div>
+          ) : tickets.length ? (
+            <div className="review-list">
+              {tickets.map((ticket) => (
+                <button
+                  key={ticket.id}
+                  className={`review-row ${ticket.id === selectedId ? "selected" : ""}`}
+                  onClick={() => setSelectedId(ticket.id)}
+                >
+                  <div className="review-row-top">
+                    <span className={`status-dot ${ticket.status}`} />
+                    <strong>{ticket.intent.replace("_", " ")}</strong>
+                    <span className={`priority ${ticket.priority}`}>{ticket.priority}</span>
+                  </div>
+                  <p>{ticket.message.slice(0, 100)}</p>
+                  <small>{ticket.customer_id} · {new Date(ticket.created_at).toLocaleDateString()}</small>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <Sparkles size={28} />
+              <strong>No draftable tickets</strong>
+              <span>Open or pending tickets will appear here.</span>
+            </div>
+          )}
+        </div>
+        <div className="review-detail-column">
+          {selectedTicket ? (
+            <>
+              <div className="detail-header">
+                <div>
+                  <span className="detail-kicker">Customer message</span>
+                  <h2>{selectedTicket.message}</h2>
+                  <p className="muted">{selectedTicket.intent.replace("_", " ")} · {selectedTicket.customer_id} · {selectedTicket.channel}</p>
+                </div>
+                <span className={`priority large ${selectedTicket.priority}`}>{selectedTicket.priority}</span>
+              </div>
+              <div className="draft-actions">
+                <button className="primary-button draft-generate" onClick={generateDraft} disabled={drafting}>
+                  <Sparkles size={16} /> {drafting ? "Generating draft..." : "Generate AI draft"}
+                </button>
+                <button className="secondary-button draft-auto" onClick={runAutoRespond} disabled={autoRunning}>
+                  <CheckCircle2 size={16} /> {autoRunning ? "Running..." : "Auto-respond"}
+                </button>
+              </div>
+              {autoResult && (
+                <div className={`auto-result ${autoResult.action}`}>
+                  {autoResult.action === "auto_sent" ? (
+                    <><CheckCircle2 size={15} /> AI replied to the customer — ticket resolved.</>
+                  ) : autoResult.action === "needs_review" ? (
+                    <><ShieldAlert size={15} /> Draft needs review — escalated to a human.</>
+                  ) : (
+                    <><CircleAlert size={15} /> Bot skipped · {autoResult.reason.replaceAll("_", " ")}.</>
+                  )}
+                </div>
+              )}
+              {draft && (
+                <div className="draft-result">
+                  <div className="draft-card">
+                    <div className="draft-card-top">
+                      <h4><MessageSquare size={15} /> Draft reply</h4>
+                      {draft.needs_review ? (
+                        <span className="draft-badge review"><ShieldAlert size={13} /> Needs review</span>
+                      ) : (
+                        <span className="draft-badge ready"><CheckCircle2 size={13} /> Ready to send</span>
+                      )}
+                    </div>
+                    <p className="draft-text">{draft.draft}</p>
+                    <div className="draft-confidence">
+                      <span>Confidence</span>
+                      <div className="confidence-track">
+                        <div className={`confidence-fill ${draft.confidence >= 0.75 ? "high" : "low"}`} style={{ width: `${Math.round(draft.confidence * 100)}%` }} />
+                      </div>
+                      <strong>{Math.round(draft.confidence * 100)}%</strong>
+                    </div>
+                  </div>
+                  {draft.reasons?.length > 0 && (
+                    <div className="draft-reasons">
+                      <h4><AlertTriangle size={15} /> Review reasons</h4>
+                      <div className="reason-chips">
+                        {draft.reasons.map((reason) => <span className="reason-chip" key={reason}>{reason.replaceAll("_", " ")}</span>)}
+                      </div>
+                    </div>
+                  )}
+                  {draft.citations?.length > 0 && (
+                    <div className="draft-citations">
+                      <h4><FileText size={15} /> Knowledge citations</h4>
+                      {draft.citations.map((citation) => (
+                        <div className="citation-row" key={citation.document_id}>
+                          <span className="citation-title">{citation.title}</span>
+                          <code>{citation.source}</code>
+                          <span className="citation-score">{Math.round(citation.score * 100)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {draft.guardrail_violations?.length > 0 && (
+                    <div className="draft-guardrails">
+                      <h4><ShieldAlert size={15} /> Guardrail violations</h4>
+                      {draft.guardrail_violations.map((violation, index) => (
+                        <div className="guardrail-flag danger" key={index}>
+                          <span className="guardrail-type">{violation.rule_type}</span>
+                          <span className="guardrail-category">{violation.category}</span>
+                          <code title={violation.description}>{violation.matched.slice(0, 40)}</code>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p className="draft-meta">Provider <strong>{draft.provider || "unset"}</strong> · Model <strong>{draft.model || "unset"}</strong> · template v{draft.template_version}{draft.ticket_id ? ` · ticket ${draft.ticket_id.slice(0, 8)}` : ""}</p>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="empty-detail">
+              <Sparkles size={28} />
+              <strong>Select a ticket</strong>
+              <span>Choose a conversation to draft an AI reply.</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AppShell({ session, onLogout }) {
   const [tickets, setTickets] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -592,13 +783,14 @@ return (
         <nav>
           <button className={`nav-item ${activeView === "inbox" ? "active" : ""}`} onClick={() => setActiveView("inbox")}><Inbox size={17} /> Inbox <span>{tickets.filter(t => t.status !== "closed").length}</span></button>
           {isStaff && <button className={`nav-item ${activeView === "escalations" ? "active" : ""}`} onClick={() => setActiveView("escalations")}><AlertTriangle size={17} /> Escalations <span>{tickets.filter(t => t.escalation_status === "pending").length}</span></button>}
+          {isStaff && <button className={`nav-item ${activeView === "ai-draft" ? "active" : ""}`} onClick={() => setActiveView("ai-draft")}><Sparkles size={17} /> AI Draft</button>}
           <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => setActiveView("conversations")}><MessageSquare size={17} /> Conversations <span>{tickets.filter(t => ["resolved", "closed"].includes(t.status)).length}</span></button>
           {session.user.role === "admin" && <button className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => setActiveView("analytics")}><BarChart3 size={17} /> Analytics</button>}
         </nav>
         <div className="sidebar-bottom"><div className="user-chip"><div className="avatar"><UserRound size={16} /></div><div><strong>{session.user.email.split("@")[0]}</strong><small>{session.user.role}</small></div></div><button className="logout-button" onClick={onLogout} title="Sign out"><LogOut size={17} /></button></div>
       </aside>
       <main className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "Escalation queue" : activeView === "conversations" ? "Conversation history" : activeView === "analytics" ? "Analytics" : isStaff ? "Support queue" : "Your conversations"}</h1></div><div className="topbar-actions"><span className="live-status"><span /> System healthy</span><button className="icon-button" onClick={loadTickets} title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "Escalation queue" : activeView === "conversations" ? "Conversation history" : activeView === "analytics" ? "Analytics" : activeView === "ai-draft" ? "AI reply drafts" : isStaff ? "Support queue" : "Your conversations"}</h1></div><div className="topbar-actions"><span className="live-status"><span /> System healthy</span><button className="icon-button" onClick={loadTickets} title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
         <section className="stats-row"><div><span>Open tickets</span><strong>{tickets.filter((ticket) => ticket.status === "open").length}</strong></div><div><span>Needs attention</span><strong>{tickets.filter((ticket) => ticket.requires_human_review).length}</strong></div><div><span>In progress</span><strong>{tickets.filter((ticket) => ticket.status === "in_progress").length}</strong></div></section>
         {notice && <div className="notice"><Check size={15} /> {notice}<button onClick={() => setNotice("")}>Dismiss</button></div>}
         {session.user.role === "admin" && <><AdminTeamPanel session={session} /><AuditActivity session={session} /></>}
@@ -606,6 +798,8 @@ return (
           <AnalyticsView session={session} />
         ) : activeView === "escalations" && isStaff ? (
           <EscalationReviewPanel session={session} />
+        ) : activeView === "ai-draft" && isStaff ? (
+          <AiDraftPanel session={session} />
         ) : (
           <section className="desk-grid">
             <div className="ticket-column">
@@ -630,7 +824,7 @@ return (
               </div>
             )}
             {isStaff && <div className="status-actions"><span>Move ticket</span>{["open", "in_progress", "pending", "resolved", "closed"].map((status) => <button className={selectedTicket.status === status ? "active" : ""} key={status} onClick={() => updateTicket(status)}>{status.replace("_", " ")}</button>)}</div>}
-            <div className="conversation"><div className="conversation-heading"><h3>Conversation</h3><span>{comments.length} messages</span></div>{comments.length ? comments.map((item) => <article className={`message ${item.is_internal ? "internal" : ""}`} key={item.id}><div className="message-avatar"><UserRound size={15} /></div><div><div className="message-meta"><strong>{item.author_id === session.user.id ? "You" : item.author_id}</strong>{item.is_internal && <span>Internal note</span>}<time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></div></article>) : <div className="empty-conversation">No messages yet. Add the first reply.</div>}<form className="comment-form" onSubmit={addComment}><textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isStaff ? "Write an internal note..." : "Write a reply..."} rows="3" /><button className="primary-button">Send <ArrowRight size={16} /></button></form></div>
+            <div className="conversation"><div className="conversation-heading"><h3>Conversation</h3><span>{comments.length} messages</span></div>{comments.length ? comments.map((item) => <article className={`message ${item.is_internal ? "internal" : ""} ${item.author_id === "ai-assistant" ? "ai" : ""}`} key={item.id}><div className="message-avatar"><Sparkles size={15} /></div><div><div className="message-meta"><strong>{item.author_id === session.user.id ? "You" : item.author_id === "ai-assistant" ? "Relay AI" : item.author_id}</strong>{item.author_id === "ai-assistant" && <span className="ai-tag">AI</span>}{item.is_internal && <span>Internal note</span>}<time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></div></article>) : <div className="empty-conversation">No messages yet. Add the first reply.</div>}<form className="comment-form" onSubmit={addComment}><textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isStaff ? "Write an internal note..." : "Write a reply..."} rows="3" /><button className="primary-button">Send <ArrowRight size={16} /></button></form></div>
           </>
         ) : (
           <div className="empty-detail"><Inbox size={28} /><strong>Select a ticket</strong><span>Choose a conversation from the queue to view details.</span></div>
