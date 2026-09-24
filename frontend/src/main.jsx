@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useState } from "react";
-import { Activity, ArrowRight, Check, CircleAlert, Inbox, LogOut, MessageSquare, Plus, RefreshCw, Search, ShieldAlert, ShieldCheck, UserCog, UserRound, Gavel, AlertTriangle, Clock, CheckCircle2, XCircle, FileText, Eye, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
+import { Activity, ArrowRight, Check, CircleAlert, Inbox, LogOut, MessageSquare, Plus, RefreshCw, Search, ShieldAlert, ShieldCheck, UserCog, UserRound, Gavel, AlertTriangle, Clock, CheckCircle2, XCircle, FileText, Eye, ChevronLeft, ChevronRight, Trash2, BarChart3, Gauge, Timer, Star, TrendingUp, Users, Hash } from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -197,6 +197,108 @@ function AuditActivity({ session }) {
     <section className="audit-panel">
       <div className="team-heading"><div><p className="eyebrow">Traceability</p><h2><Activity size={19} /> Recent activity</h2><p className="muted">A record of important changes across the workspace.</p></div><span>{logs.length} recent events</span></div>
       {error ? <div className="team-notice error-text">{error}</div> : logs.length ? <div className="audit-list">{logs.map((log) => <article className="audit-row" key={log.id}><div className="audit-icon"><Activity size={14} /></div><div className="audit-copy"><strong>{log.action.replaceAll(".", " / ")}</strong><small>{log.entity_type} · {log.entity_id.slice(0, 8)} · {log.actor_id ? `by ${log.actor_id.slice(0, 8)}` : "system"}</small></div><time>{new Date(log.created_at).toLocaleString()}</time></article>)}</div> : <div className="empty-audit">No activity recorded yet.</div>}
+    </section>
+  );
+}
+
+function BreakdownBars({ items }) {
+  const max = Math.max(...items.map((item) => item.count), 1);
+  return (
+    <div className="breakdown">
+      {items.length ? items.map((item) => (
+        <div className="breakdown-row" key={item.value}>
+          <span className="breakdown-label" title={item.value}>{item.value || "unassigned"}</span>
+          <div className="breakdown-track"><div className="breakdown-fill" style={{ width: item.count === 0 ? 0 : `${Math.max((item.count / max) * 100, 6)}%` }} /></div>
+          <span className="breakdown-count">{item.count}</span>
+        </div>
+      )) : <div className="empty-audit">No data yet.</div>}
+    </div>
+  );
+}
+
+function StatCard({ icon, label, value, sub, tone }) {
+  return (
+    <article className={`analytics-stat ${tone || ""}`}>
+      <div className="analytics-stat-icon">{icon}</div>
+      <div className="analytics-stat-copy"><span>{label}</span><strong>{value}</strong>{sub && <small>{sub}</small>}</div>
+    </article>
+  );
+}
+
+function AnalyticsView({ session }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    apiRequest("/admin/analytics/dashboard", {}, session.access_token)
+      .then(setData)
+      .catch((requestError) => setError(requestError.message));
+  }, [session.access_token]);
+
+  if (error) return <section className="analytics-panel"><div className="team-notice error-text">{error}</div></section>;
+  if (!data) return <section className="analytics-panel"><div className="empty-state"><BarChart3 size={28} /><strong>Loading analytics...</strong></div></section>;
+
+  const { sla, csat, escalation, workload, channels, priorities, intents, sentiments, confidence } = data;
+  const pct = (value) => (value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)}%`);
+  const ratingBars = [5, 4, 3, 2, 1].map((star) => ({ value: `${star} star`, count: csat.rating_distribution?.[String(star)] || 0 }));
+
+  return (
+    <section className="analytics-panel">
+      <div className="team-heading">
+        <div>
+          <p className="eyebrow">Operations</p>
+          <h2><BarChart3 size={19} /> Analytics</h2>
+          <p className="muted">Service health, satisfaction and team load at a glance.</p>
+        </div>
+        <span>{new Date().toLocaleDateString()}</span>
+      </div>
+
+      <div className="analytics-stats">
+        <StatCard icon={<Gauge size={17} />} label="Avg resolution" value={sla.average_resolution_hours === null ? "—" : `${sla.average_resolution_hours}h`} sub={`${sla.resolved_tickets} resolved of ${sla.total_tickets} total`} tone="teal" />
+        <StatCard icon={<Timer size={17} />} label="Overdue SLA" value={sla.overdue_tickets} sub="open tickets past deadline" tone="danger" />
+        <StatCard icon={<Star size={17} />} label="Avg rating" value={csat.average_rating === null ? "—" : `${csat.average_rating} / 5`} sub={`${csat.total_feedback} responses`} tone="amber" />
+        <StatCard icon={<TrendingUp size={17} />} label="Deflection rate" value={pct(csat.deflection_rate)} sub={`response rate ${pct(csat.response_rate)}`} tone="teal" />
+        <StatCard icon={<AlertTriangle size={17} />} label="Escalation rate" value={pct(escalation.escalation_rate)} sub={`${escalation.pending_review} pending review`} tone="danger" />
+        <StatCard icon={<CircleAlert size={17} />} label="Needs review" value={escalation.pending_review} sub={`${escalation.approved} approved · ${escalation.rejected} rejected`} tone="amber" />
+      </div>
+
+      <div className="analytics-grid">
+        <article className="analytics-card">
+          <header><h4><Star size={15} /> CSAT distribution</h4></header>
+          <BreakdownBars items={ratingBars} />
+        </article>
+        <article className="analytics-card">
+          <header><h4><Activity size={15} /> Triage confidence</h4></header>
+          <BreakdownBars items={[
+            { value: "0.90+", count: confidence.very_high },
+            { value: "0.80 - 0.89", count: confidence.high },
+            { value: "0.70 - 0.79", count: confidence.medium },
+            { value: "below 0.70", count: confidence.low },
+          ]} />
+          <p className="analytics-footnote">Average triage confidence: {confidence.average === null ? "—" : confidence.average.toFixed(2)}</p>
+        </article>
+        <article className="analytics-card">
+          <header><h4><Users size={15} /> Team workload</h4></header>
+          <BreakdownBars items={workload.map((entry) => ({ value: entry.assignee_id ? `agent ${entry.assignee_id.slice(0, 8)}` : "Unassigned", count: entry.assigned_tickets }))} />
+        </article>
+        <article className="analytics-card">
+          <header><h4><Inbox size={15} /> Channels</h4></header>
+          <BreakdownBars items={channels} />
+        </article>
+        <article className="analytics-card">
+          <header><h4><Hash size={15} /> Priorities</h4></header>
+          <BreakdownBars items={priorities} />
+        </article>
+        <article className="analytics-card">
+          <header><h4><FileText size={15} /> Intents</h4></header>
+          <BreakdownBars items={intents} />
+        </article>
+      </div>
+
+      <article className="analytics-card">
+        <header><h4><MessageSquare size={15} /> Customer sentiment</h4></header>
+        <BreakdownBars items={sentiments} />
+      </article>
     </section>
   );
 }
@@ -491,15 +593,18 @@ return (
           <button className={`nav-item ${activeView === "inbox" ? "active" : ""}`} onClick={() => setActiveView("inbox")}><Inbox size={17} /> Inbox <span>{tickets.filter(t => t.status !== "closed").length}</span></button>
           {isStaff && <button className={`nav-item ${activeView === "escalations" ? "active" : ""}`} onClick={() => setActiveView("escalations")}><AlertTriangle size={17} /> Escalations <span>{tickets.filter(t => t.escalation_status === "pending").length}</span></button>}
           <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => setActiveView("conversations")}><MessageSquare size={17} /> Conversations <span>{tickets.filter(t => ["resolved", "closed"].includes(t.status)).length}</span></button>
+          {session.user.role === "admin" && <button className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => setActiveView("analytics")}><BarChart3 size={17} /> Analytics</button>}
         </nav>
         <div className="sidebar-bottom"><div className="user-chip"><div className="avatar"><UserRound size={16} /></div><div><strong>{session.user.email.split("@")[0]}</strong><small>{session.user.role}</small></div></div><button className="logout-button" onClick={onLogout} title="Sign out"><LogOut size={17} /></button></div>
       </aside>
       <main className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "Escalation queue" : activeView === "conversations" ? "Conversation history" : isStaff ? "Support queue" : "Your conversations"}</h1></div><div className="topbar-actions"><span className="live-status"><span /> System healthy</span><button className="icon-button" onClick={loadTickets} title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "Escalation queue" : activeView === "conversations" ? "Conversation history" : activeView === "analytics" ? "Analytics" : isStaff ? "Support queue" : "Your conversations"}</h1></div><div className="topbar-actions"><span className="live-status"><span /> System healthy</span><button className="icon-button" onClick={loadTickets} title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
         <section className="stats-row"><div><span>Open tickets</span><strong>{tickets.filter((ticket) => ticket.status === "open").length}</strong></div><div><span>Needs attention</span><strong>{tickets.filter((ticket) => ticket.requires_human_review).length}</strong></div><div><span>In progress</span><strong>{tickets.filter((ticket) => ticket.status === "in_progress").length}</strong></div></section>
         {notice && <div className="notice"><Check size={15} /> {notice}<button onClick={() => setNotice("")}>Dismiss</button></div>}
         {session.user.role === "admin" && <><AdminTeamPanel session={session} /><AuditActivity session={session} /></>}
-        {activeView === "escalations" && isStaff ? (
+        {activeView === "analytics" && session.user.role === "admin" ? (
+          <AnalyticsView session={session} />
+        ) : activeView === "escalations" && isStaff ? (
           <EscalationReviewPanel session={session} />
         ) : (
           <section className="desk-grid">
