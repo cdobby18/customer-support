@@ -118,9 +118,9 @@ Provider SDKs and outbound delivery are still pending.
 
 | Order | Task | Agent |
 |-------|------|-------|
-| — | *(Tasks 12, 13, 14, 15 — see REMAINING_TASKS.md)* | — |
+| 16 | **Full Codebase Review & Simplification** | All |
 
-LLM-dependent tasks (1–4, 6–7) still pending, as are the AI-draft review parts of Task 9 (blocked on Tasks 3/7).
+Tasks 12–15 are done (see REMAINING_TASKS.md). LLM-dependent tasks (1–4, 6–7) still pending, as are the AI-draft review parts of Task 9 (blocked on Tasks 3/7).
 
 ## Final Review Notes
 
