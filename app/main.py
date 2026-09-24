@@ -33,8 +33,19 @@ from app.models import (
 )
 from app.triage import TriageResult, classify_ticket
 from app.intake import normalize_message, NormalizedMessage, enrich_customer_context
-from app.guardrails import evaluate, PolicyReport
+from app.guardrails import (
+    evaluate,
+    PolicyReport,
+    Violation,
+)
 from app.integrations import sync_ticket_outbound
+from app.llm import (
+    get_llm_usage_summary,
+    LLMConfigError,
+    LLMError,
+    reset_llm_usage,
+)
+from app.response_agent import DraftResult, draft_reply
 from app.observability import (
     RequestContextMiddleware,
     get_app_logger,
@@ -235,6 +246,38 @@ class DashboardAnalytics(BaseModel):
     confidence: ConfidenceHistogram
 
 
+class ModelUsage(BaseModel):
+    model: str
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float
+
+
+class ResponseDraft(DraftResult):
+    ticket_id: str
+
+
+class AutoRespondResponse(BaseModel):
+    ticket_id: str
+    action: str
+    reason: str | None = None
+    comment_id: str | None = None
+    draft: DraftResult | None = None
+
+
+AI_ASSISTANT_ID = "ai-assistant"
+
+
+class LlmUsageSummary(BaseModel):
+    total_calls: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_cost_usd: float
+    since: str | None
+    by_model: list[ModelUsage]
+
+
 class LoginResponse(BaseModel):
     authenticated: bool
     user: UserResponse
@@ -376,6 +419,16 @@ def validate_security_configuration() -> None:
         raise RuntimeError(
             f"SUPPORT_TOOL_PROVIDER={provider!r} is invalid; expected one of: mock, zendesk, hubspot"
         )
+    llm_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if llm_provider and llm_provider not in {"mock", "openai", "azure_openai"}:
+        raise RuntimeError(
+            f"LLM_PROVIDER={llm_provider!r} is invalid; expected one of: mock, openai, azure_openai"
+        )
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "local").strip().lower()
+    if embedding_provider not in {"local", "openai"}:
+        raise RuntimeError(
+            f"EMBEDDING_PROVIDER={embedding_provider!r} is invalid; expected one of: local, openai"
+        )
     if os.getenv("APP_ENV", "development").lower() != "production":
         return
     required_secrets = {
@@ -386,6 +439,33 @@ def validate_security_configuration() -> None:
         configured_value = os.getenv(variable_name, "")
         if not configured_value or configured_value == insecure_default:
             raise RuntimeError(f"{variable_name} must be configured for production")
+    if llm_provider == "mock":
+        raise RuntimeError(
+            "LLM_PROVIDER=mock is not allowed in production; use openai or azure_openai"
+        )
+    if llm_provider == "openai" and not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "OPENAI_API_KEY must be configured when LLM_PROVIDER=openai in production"
+        )
+    if llm_provider == "azure_openai":
+        missing = [
+            variable
+            for variable in (
+                "AZURE_OPENAI_ENDPOINT",
+                "AZURE_OPENAI_DEPLOYMENT",
+                "AZURE_OPENAI_API_KEY",
+            )
+            if not os.getenv(variable)
+        ]
+        if missing:
+            required = ", ".join(missing)
+            raise RuntimeError(
+                f"{required} must be configured when LLM_PROVIDER=azure_openai in production"
+            )
+    if embedding_provider == "openai" and not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "OPENAI_API_KEY must be configured when EMBEDDING_PROVIDER=openai in production"
+        )
 
 
 @asynccontextmanager
@@ -959,6 +1039,24 @@ def analytics_dashboard(
     )
 
 
+@app.get("/admin/llm/usage", response_model=LlmUsageSummary)
+def llm_usage_summary(
+    _: UserRecord = Depends(require_admin),
+) -> LlmUsageSummary:
+    return LlmUsageSummary(**get_llm_usage_summary())
+
+
+@app.post("/admin/llm/usage/reset", response_model=LlmUsageSummary)
+def reset_llm_usage_endpoint(
+    current_admin: UserRecord = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> LlmUsageSummary:
+    reset_llm_usage()
+    add_audit_log(db, current_admin.id, "llm.usage_reset", "llm", "", {})
+    db.commit()
+    return LlmUsageSummary(**get_llm_usage_summary())
+
+
 @app.patch("/admin/users/{user_id}", response_model=UserResponse)
 def update_user_status(
     user_id: UUID,
@@ -1120,6 +1218,7 @@ def create_ticket(
             "summary": record.message[:200],
         },
     )
+    _maybe_auto_respond(db, record)
     _record_integration_sync(
         db,
         current_user.id,
@@ -1292,6 +1391,7 @@ async def receive_channel_message(
             "external_id": normalized.external_id,
         },
     )
+    _maybe_auto_respond(db, record)
     _record_integration_sync(
         db,
         None,
@@ -1575,3 +1675,179 @@ def submit_feedback(
     db.commit()
     db.refresh(record)
     return to_feedback(record)
+
+
+@app.post("/tickets/{ticket_id}/response-draft", response_model=ResponseDraft)
+def draft_ticket_response(
+    ticket_id: UUID,
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ResponseDraft:
+    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
+        raise HTTPException(status_code=403, detail="Support staff access required")
+    record = db.get(TicketRecord, str(ticket_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    try:
+        result = draft_reply(record.message)
+    except LLMConfigError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LLM gateway is not configured: {exc}",
+        ) from exc
+    except LLMError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Response agent failed: {exc}",
+        ) from exc
+
+    add_audit_log(
+        db,
+        current_user.id,
+        "response.draft_generated",
+        "ticket",
+        record.id,
+        {
+            "needs_review": result.needs_review,
+            "confidence": result.confidence,
+            "provider": result.provider,
+            "model": result.model,
+            "reasons": result.reasons,
+        },
+    )
+    db.commit()
+    return ResponseDraft(ticket_id=str(ticket_id), **result.model_dump())
+
+
+def auto_respond_enabled() -> bool:
+    return os.getenv("AUTO_RESPOND_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auto_skip_result(ticket_id: str, reason: str) -> AutoRespondResponse:
+    return AutoRespondResponse(ticket_id=ticket_id, action="skipped", reason=reason)
+
+
+def run_auto_response(
+    db: Session,
+    ticket: TicketRecord,
+    actor_id: str = AI_ASSISTANT_ID,
+) -> AutoRespondResponse:
+    now = datetime.now(timezone.utc)
+    if ticket.status != TicketStatus.open.value:
+        return _auto_skip_result(ticket.id, "ticket_not_open")
+    if ticket.requires_human_review:
+        return _auto_skip_result(ticket.id, "already_flagged_for_review")
+
+    try:
+        result = draft_reply(ticket.message)
+    except LLMConfigError as exc:
+        add_audit_log(
+            db,
+            actor_id,
+            "response.auto_skipped",
+            "ticket",
+            ticket.id,
+            {"reason": "llm_not_configured", "detail": str(exc)},
+        )
+        db.commit()
+        return _auto_skip_result(ticket.id, "llm_not_configured")
+    except LLMError as exc:
+        add_audit_log(
+            db,
+            actor_id,
+            "response.auto_skipped",
+            "ticket",
+            ticket.id,
+            {"reason": "provider_error", "detail": str(exc)},
+        )
+        db.commit()
+        return _auto_skip_result(ticket.id, "provider_error")
+
+    if result.needs_review:
+        ticket.status = TicketStatus.pending.value
+        ticket.requires_human_review = True
+        ticket.escalation_status = EscalationStatus.pending.value
+        ticket.escalation_reason = ticket.escalation_reason or "AI could not answer confidently"
+        ticket.escalated_at = now
+        ticket.updated_at = now
+        add_audit_log(
+            db,
+            actor_id,
+            "response.auto_escalated",
+            "ticket",
+            ticket.id,
+            {
+                "confidence": result.confidence,
+                "reasons": result.reasons,
+            },
+        )
+        db.commit()
+        db.refresh(ticket)
+        return AutoRespondResponse(ticket_id=ticket.id, action="needs_review", draft=result)
+
+    comment = TicketCommentRecord(
+        id=str(uuid4()),
+        ticket_id=ticket.id,
+        author_id=AI_ASSISTANT_ID,
+        body=result.draft,
+        is_internal=False,
+        created_at=now,
+    )
+    db.add(comment)
+    ticket.status = TicketStatus.resolved.value
+    ticket.requires_human_review = False
+    ticket.escalation_status = EscalationStatus.none.value
+    ticket.first_response_at = ticket.first_response_at or now
+    ticket.resolved_at = now
+    ticket.updated_at = now
+    add_audit_log(
+        db,
+        actor_id,
+        "response.auto_sent",
+        "ticket",
+        ticket.id,
+        {
+            "confidence": result.confidence,
+            "reasons": result.reasons,
+            "citations": [citation.document_id for citation in result.citations],
+        },
+    )
+    db.commit()
+    return AutoRespondResponse(
+        ticket_id=ticket.id,
+        action="auto_sent",
+        comment_id=comment.id,
+        draft=result,
+    )
+
+
+def _maybe_auto_respond(db: Session, record: TicketRecord) -> None:
+    if not auto_respond_enabled():
+        return
+    try:
+        run_auto_response(db, record, actor_id=AI_ASSISTANT_ID)
+    except Exception as exc:
+        add_audit_log(
+            db,
+            AI_ASSISTANT_ID,
+            "response.auto_skipped",
+            "ticket",
+            record.id,
+            {"reason": "unexpected_error", "detail": str(exc)},
+        )
+        db.commit()
+
+
+@app.post("/tickets/{ticket_id}/auto-respond", response_model=AutoRespondResponse)
+def auto_respond_ticket(
+    ticket_id: UUID,
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AutoRespondResponse:
+    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
+        raise HTTPException(status_code=403, detail="Support staff access required")
+    record = db.get(TicketRecord, str(ticket_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return run_auto_response(db, record, actor_id=current_user.id)

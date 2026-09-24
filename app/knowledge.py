@@ -49,7 +49,7 @@ def search_knowledge(query: str, limit: int = 5) -> list[KnowledgeMatch]:
                 title=r["title"],
                 source=r["source"],
                 excerpt=excerpt,
-                score=round(r["score"], 3),
+                score=round(max(0.0, r["score"]), 3),
             )
         )
     return matches
