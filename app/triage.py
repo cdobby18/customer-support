@@ -1,6 +1,10 @@
 from enum import Enum
+import json
 
 from pydantic import BaseModel, Field
+
+from app.llm import generate_json, LLMNotConfigured, LLMError
+from app.prompts import get_template
 
 
 class TriageIntent(str, Enum):
@@ -35,6 +39,32 @@ class TriageResult(BaseModel):
 
 
 def classify_ticket(message: str) -> TriageResult:
+    try:
+        return _classify_with_llm(message)
+    except (LLMNotConfigured, LLMError):
+        return _classify_with_keywords(message)
+
+
+def _classify_with_llm(message: str) -> TriageResult:
+    template = get_template("triage.classify")
+    rendered = template.render(message=message)
+    data = generate_json(prompt=rendered, max_tokens=400)
+
+    if "intent" not in data:
+        raise LLMError("LLM response missing required 'intent' field")
+
+    return TriageResult(
+        intent=TriageIntent(data["intent"]),
+        priority=TriagePriority(data["priority"]),
+        sentiment=TriageSentiment(data["sentiment"]),
+        confidence=float(data.get("confidence", 0.7)),
+        recommended_team=data.get("recommended_team", "customer_support"),
+        requires_human_review=bool(data.get("requires_human_review", False)),
+        summary=data.get("summary", " ".join(message.strip().split())[:240]),
+    )
+
+
+def _classify_with_keywords(message: str) -> TriageResult:
     normalized_message = message.lower()
     summary = " ".join(message.strip().split())[:240]
 
