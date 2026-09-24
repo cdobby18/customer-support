@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import time
+from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -46,6 +47,12 @@ from app.llm import (
     reset_llm_usage,
 )
 from app.response_agent import DraftResult, draft_reply
+from app.escalation import (
+    EscalationRiskLevel,
+    route_for_risk,
+    score_escalation,
+    summarize_escalation,
+)
 from app.observability import (
     RequestContextMiddleware,
     get_app_logger,
@@ -124,6 +131,10 @@ class Ticket(TicketCreate):
     triage_summary: str | None
     status: TicketStatus
     assignee_id: str | None
+    risk_score: float | None
+    risk_level: str | None
+    escalation_summary: str | None
+    escalation_route: str | None
     created_at: datetime
     updated_at: datetime
     intake_metadata: dict | None = None
@@ -266,6 +277,21 @@ class AutoRespondResponse(BaseModel):
     draft: DraftResult | None = None
 
 
+class DraftDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    body: str | None = Field(default=None, min_length=1, max_length=2000)
+    note: str | None = Field(default=None, min_length=1, max_length=500)
+    resolve: bool = True
+
+
+class DraftDecisionResponse(BaseModel):
+    ticket_id: str
+    decision: str
+    resolved: bool = False
+    comment_id: str | None = None
+    note_id: str | None = None
+
+
 AI_ASSISTANT_ID = "ai-assistant"
 
 
@@ -307,6 +333,10 @@ def to_ticket(record: TicketRecord) -> Ticket:
         triage_summary=record.triage_summary,
         status=TicketStatus(record.status),
         assignee_id=record.assignee_id,
+        risk_score=record.risk_score,
+        risk_level=record.risk_level,
+        escalation_summary=record.escalation_summary,
+        escalation_route=record.escalation_route,
         created_at=record.created_at,
         updated_at=record.updated_at,
         intake_metadata=record.intake_metadata,
@@ -539,6 +569,64 @@ def as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def build_escalation_intelligence(
+    *,
+    message: str,
+    intent: str,
+    priority: str,
+    sentiment: str,
+    recommended_team: str | None,
+    tier: str | None = None,
+    open_tickets_count: int = 0,
+    sla_breached: bool = False,
+    guardrail_flagged: bool = False,
+    guardrail_hits: list[str] | None = None,
+    always_summary: bool = False,
+) -> dict[str, object]:
+    risk = score_escalation(
+        intent=intent,
+        priority=priority,
+        sentiment=sentiment,
+        tier=tier,
+        open_tickets_count=open_tickets_count,
+        sla_breached=sla_breached,
+        guardrail_flagged=guardrail_flagged,
+    )
+    route = route_for_risk(intent, recommended_team, risk.level)
+    summary = None
+    if always_summary or risk.level in {EscalationRiskLevel.high, EscalationRiskLevel.critical}:
+        summary = summarize_escalation(
+            message,
+            intent=intent,
+            priority=priority,
+            sentiment=sentiment,
+            tier=tier,
+            open_tickets_count=open_tickets_count,
+            sla_breached=sla_breached,
+            guardrail_hits=guardrail_hits,
+            route=route,
+        )
+    return {
+        "risk_score": risk.score,
+        "risk_level": risk.level.value,
+        "escalation_route": route,
+        "escalation_summary": summary.text if summary else None,
+    }
+
+
+def customer_context_from_record(record: TicketRecord) -> tuple[str | None, int]:
+    metadata = record.intake_metadata if isinstance(record.intake_metadata, dict) else {}
+    context = metadata.get("customer_context")
+    if not isinstance(context, dict):
+        return None, 0
+    tier = context.get("tier")
+    try:
+        open_tickets = int(context.get("open_tickets_count", 0) or 0)
+    except (TypeError, ValueError):
+        open_tickets = 0
+    return (str(tier) if tier else None), open_tickets
 
 
 def webhook_secret_is_valid(provided_secret: str | None) -> bool:
@@ -1148,6 +1236,23 @@ def create_ticket(
     now = datetime.now(timezone.utc)
     requires_review = triage_result.requires_human_review or guardrail_report.is_risky
     escalation_status = EscalationStatus.pending if requires_review else EscalationStatus.none
+    customer_context = enrich_customer_context(db, ticket_data.customer_id)
+    escalation_fields = build_escalation_intelligence(
+        message=ticket_data.message,
+        intent=triage_result.intent.value,
+        priority=triage_result.priority.value,
+        sentiment=triage_result.sentiment.value,
+        recommended_team=triage_result.recommended_team,
+        tier=customer_context.tier,
+        open_tickets_count=customer_context.open_tickets_count,
+        guardrail_flagged=guardrail_report.is_risky,
+        guardrail_hits=(
+            sorted({violation.category for violation in guardrail_report.violations})
+            if guardrail_report.violations
+            else None
+        ),
+        always_summary=requires_review,
+    )
     if triage_result.requires_human_review:
         escalation_reason = f"Sensitive {triage_result.intent.value} issue"
     elif guardrail_report.is_risky:
@@ -1173,6 +1278,10 @@ def create_ticket(
         resolved_at=None,
         status=TicketStatus.open.value,
         assignee_id=None,
+        risk_score=escalation_fields["risk_score"],
+        risk_level=escalation_fields["risk_level"],
+        escalation_summary=escalation_fields["escalation_summary"],
+        escalation_route=escalation_fields["escalation_route"],
         guardrail_status="flagged" if guardrail_report.violations else "clean",
         guardrail_hits=(
             [violation.model_dump() for violation in guardrail_report.violations]
@@ -1181,6 +1290,7 @@ def create_ticket(
         ),
         created_at=now,
         updated_at=now,
+        intake_metadata={"customer_context": customer_context.model_dump(mode="json")},
         **ticket_data.model_dump(),
     )
     db.add(record)
@@ -1192,6 +1302,15 @@ def create_ticket(
         record.id,
         {"intent": record.intent, "priority": record.priority},
     )
+    if requires_review:
+        add_audit_log(
+            db,
+            current_user.id,
+            "escalation.auto_routed",
+            "ticket",
+            record.id,
+            {"level": record.risk_level, "route": record.escalation_route},
+        )
     if guardrail_report.violations:
         add_audit_log(
             db,
@@ -1303,6 +1422,22 @@ async def receive_channel_message(
     triage_result = triage(normalized.message)
     now = datetime.now(timezone.utc)
     requires_review = triage_result.requires_human_review or guardrail_report.is_risky
+    escalation_fields = build_escalation_intelligence(
+        message=normalized.message,
+        intent=triage_result.intent.value,
+        priority=triage_result.priority.value,
+        sentiment=triage_result.sentiment.value,
+        recommended_team=triage_result.recommended_team,
+        tier=customer_context.tier if customer_context else None,
+        open_tickets_count=customer_context.open_tickets_count if customer_context else 0,
+        guardrail_flagged=guardrail_report.is_risky,
+        guardrail_hits=(
+            sorted({violation.category for violation in guardrail_report.violations})
+            if guardrail_report.violations
+            else None
+        ),
+        always_summary=requires_review,
+    )
     if triage_result.requires_human_review:
         escalation_reason = f"Sensitive {triage_result.intent.value} issue"
     elif guardrail_report.is_risky:
@@ -1331,6 +1466,10 @@ async def receive_channel_message(
         resolved_at=None,
         status=TicketStatus.open.value,
         assignee_id=None,
+        risk_score=escalation_fields["risk_score"],
+        risk_level=escalation_fields["risk_level"],
+        escalation_summary=escalation_fields["escalation_summary"],
+        escalation_route=escalation_fields["escalation_route"],
         guardrail_status="flagged" if guardrail_report.violations else "clean",
         guardrail_hits=(
             [violation.model_dump() for violation in guardrail_report.violations]
@@ -1376,6 +1515,15 @@ async def receive_channel_message(
                 "violation_count": len(guardrail_report.violations),
                 "types": sorted({violation.rule_type.value for violation in guardrail_report.violations}),
             },
+        )
+    if requires_review:
+        add_audit_log(
+            db,
+            None,
+            "escalation.auto_routed",
+            "ticket",
+            record.id,
+            {"level": record.risk_level, "route": record.escalation_route},
         )
     db.commit()
     db.refresh(record)
@@ -1765,12 +1913,33 @@ def run_auto_response(
         return _auto_skip_result(ticket.id, "provider_error")
 
     if result.needs_review:
+        tier, open_count = customer_context_from_record(ticket)
+        sla_breached = ticket.sla_due_at is not None and as_utc(ticket.sla_due_at) < now
+        escalation_fields = build_escalation_intelligence(
+            message=ticket.message,
+            intent=ticket.intent,
+            priority=ticket.priority,
+            sentiment=ticket.sentiment or "neutral",
+            recommended_team=ticket.recommended_team,
+            tier=tier,
+            open_tickets_count=open_count,
+            sla_breached=sla_breached,
+            guardrail_flagged=ticket.guardrail_status == "flagged",
+            guardrail_hits=sorted(
+                {hit.get("category") for hit in (ticket.guardrail_hits or []) if isinstance(hit, dict)}
+            ) or None,
+            always_summary=True,
+        )
         ticket.status = TicketStatus.pending.value
         ticket.requires_human_review = True
         ticket.escalation_status = EscalationStatus.pending.value
         ticket.escalation_reason = ticket.escalation_reason or "AI could not answer confidently"
         ticket.escalated_at = now
         ticket.updated_at = now
+        ticket.risk_score = escalation_fields["risk_score"]
+        ticket.risk_level = escalation_fields["risk_level"]
+        ticket.escalation_summary = escalation_fields["escalation_summary"]
+        ticket.escalation_route = escalation_fields["escalation_route"]
         add_audit_log(
             db,
             actor_id,
@@ -1780,6 +1949,8 @@ def run_auto_response(
             {
                 "confidence": result.confidence,
                 "reasons": result.reasons,
+                "risk_level": ticket.risk_level,
+                "route": ticket.escalation_route,
             },
         )
         db.commit()
@@ -1851,3 +2022,105 @@ def auto_respond_ticket(
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return run_auto_response(db, record, actor_id=current_user.id)
+
+
+@app.post("/tickets/{ticket_id}/draft-decision", response_model=DraftDecisionResponse)
+def decide_draft(
+    ticket_id: UUID,
+    decision_data: DraftDecisionRequest,
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DraftDecisionResponse:
+    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
+        raise HTTPException(status_code=403, detail="Support staff access required")
+    record = db.get(TicketRecord, str(ticket_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    now = datetime.now(timezone.utc)
+
+    if decision_data.decision == "approve":
+        if not decision_data.body:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Draft body is required to approve",
+            )
+        comment = TicketCommentRecord(
+            id=str(uuid4()),
+            ticket_id=record.id,
+            author_id=current_user.id,
+            body=decision_data.body,
+            is_internal=False,
+            created_at=now,
+        )
+        db.add(comment)
+        record.first_response_at = record.first_response_at or now
+        resolved = decision_data.resolve
+        if resolved:
+            record.status = TicketStatus.resolved.value
+            record.requires_human_review = False
+            record.escalation_status = EscalationStatus.none.value
+            record.escalation_reason = None
+            record.resolved_at = now
+        record.updated_at = now
+        add_audit_log(
+            db,
+            current_user.id,
+            "response.draft_approved",
+            "ticket",
+            record.id,
+            {"comment_id": comment.id, "resolve": resolved, "is_internal": False},
+        )
+        db.commit()
+        _record_integration_sync(
+            db,
+            current_user.id,
+            "response.draft_approved",
+            record,
+            sync_ticket_outbound(
+                db,
+                record,
+                "response.draft_approved",
+                comment_payload={
+                    "id": comment.id,
+                    "body": comment.body,
+                    "is_internal": False,
+                    "author_id": comment.author_id,
+                },
+            ),
+        )
+        return DraftDecisionResponse(
+            ticket_id=record.id,
+            decision="approve",
+            resolved=resolved,
+            comment_id=comment.id,
+        )
+
+    note_id = None
+    if decision_data.note:
+        note = TicketCommentRecord(
+            id=str(uuid4()),
+            ticket_id=record.id,
+            author_id=current_user.id,
+            body=f"AI draft rejected: {decision_data.note}",
+            is_internal=True,
+            created_at=now,
+        )
+        db.add(note)
+        note_id = note.id
+        record.updated_at = now
+    add_audit_log(
+        db,
+        current_user.id,
+        "response.draft_rejected",
+        "ticket",
+        record.id,
+        {"note_id": note_id, "is_internal": True},
+    )
+    db.commit()
+    return DraftDecisionResponse(
+        ticket_id=record.id,
+        decision="reject",
+        resolved=False,
+        note_id=note_id,
+    )

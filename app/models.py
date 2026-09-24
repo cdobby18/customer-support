@@ -66,6 +66,10 @@ class TicketRecord(Base):
     guardrail_hits: Mapped[list | None] = mapped_column(JSON, nullable=True)
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risk_level: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    escalation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    escalation_route: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 class TicketCommentRecord(Base):
