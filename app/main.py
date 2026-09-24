@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, sta
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import jwt
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -22,6 +22,7 @@ from app.database import get_db, init_db
 from app.knowledge import KnowledgeMatch, search_knowledge
 from app.models import AuditLogRecord, TicketCommentRecord, TicketRecord, UserRecord, UserRole
 from app.triage import TriageResult, classify_ticket
+from app.intake import normalize_message, NormalizedMessage, enrich_customer_context
 
 
 class TicketStatus(str, Enum):
@@ -93,6 +94,7 @@ class Ticket(TicketCreate):
     assignee_id: str | None
     created_at: datetime
     updated_at: datetime
+    intake_metadata: dict | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -169,6 +171,7 @@ def to_ticket(record: TicketRecord) -> Ticket:
         assignee_id=record.assignee_id,
         created_at=record.created_at,
         updated_at=record.updated_at,
+        intake_metadata=record.intake_metadata,
     )
 
 
@@ -518,6 +521,31 @@ def update_user_status(
     return to_user(record)
 
 
+@app.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: UUID,
+    current_admin: UserRecord = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> None:
+    if str(user_id) == current_admin.id:
+        raise HTTPException(status_code=400, detail="Administrators cannot delete themselves")
+    record = db.get(UserRecord, str(user_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if record.role == UserRole.admin.value:
+        raise HTTPException(status_code=400, detail="Cannot delete another admin")
+    add_audit_log(
+        db,
+        current_admin.id,
+        "user.deleted",
+        "user",
+        record.id,
+        {"email": record.email, "role": record.role},
+    )
+    db.delete(record)
+    db.commit()
+
+
 @app.post("/auth/login", response_model=LoginResponse)
 def login_user(user_data: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     normalized_email = str(user_data.email).lower()
@@ -599,9 +627,9 @@ def create_ticket(
 
 
 @app.post("/webhooks/{channel}", response_model=Ticket, status_code=status.HTTP_201_CREATED)
-def receive_channel_message(
+async def receive_channel_message(
     channel: str,
-    message_data: ChannelMessage,
+    request: Request,
     x_webhook_secret: str | None = Header(default=None),
     _: None = Depends(enforce_webhook_rate_limit),
     db: Session = Depends(get_db),
@@ -612,13 +640,22 @@ def receive_channel_message(
     if not webhook_secret_is_valid(x_webhook_secret):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
-    triage_result = triage(message_data.message)
+    raw_payload = await request.json()
+
+    normalized = normalize_message(channel, raw_payload)
+    if normalized is None:
+        raise HTTPException(status_code=400, detail=f"No adapter for channel: {channel}")
+
+    customer_context = enrich_customer_context(db, normalized.customer_id)
+    normalized.customer_context = customer_context
+
+    triage_result = triage(normalized.message)
     now = datetime.now(timezone.utc)
     requires_review = triage_result.requires_human_review
     record = TicketRecord(
         id=str(uuid4()),
-        customer_id=message_data.customer_id,
-        message=message_data.message,
+        customer_id=normalized.customer_id,
+        message=normalized.message,
         channel=channel,
         intent=triage_result.intent.value,
         priority=triage_result.priority.value,
@@ -638,6 +675,14 @@ def receive_channel_message(
         assignee_id=None,
         created_at=now,
         updated_at=now,
+        intake_metadata={
+            "external_id": normalized.external_id,
+            "thread_id": normalized.thread_id,
+            "attachments": [att.model_dump() for att in normalized.attachments],
+            "channel_metadata": normalized.channel_metadata,
+            "received_at": normalized.received_at.isoformat(),
+            "customer_context": customer_context.model_dump() if customer_context else None,
+        },
     )
     db.add(record)
     add_audit_log(
@@ -646,7 +691,12 @@ def receive_channel_message(
         "channel.ticket_created",
         "ticket",
         record.id,
-        {"channel": channel, "external_id": message_data.external_id},
+        {
+            "channel": channel,
+            "external_id": normalized.external_id,
+            "thread_id": normalized.thread_id,
+            "attachment_count": len(normalized.attachments),
+        },
     )
     db.commit()
     db.refresh(record)
@@ -757,6 +807,36 @@ def update_ticket(
     db.commit()
     db.refresh(record)
     return to_ticket(record)
+
+
+@app.delete("/tickets/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_ticket(
+    ticket_id: UUID,
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    if current_user.role == UserRole.customer.value:
+        raise HTTPException(status_code=403, detail="Customers cannot delete tickets")
+    record = db.get(TicketRecord, str(ticket_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    ensure_ticket_access(record, current_user)
+    comment_count = len(
+        db.scalars(
+            select(TicketCommentRecord.id).where(TicketCommentRecord.ticket_id == str(ticket_id))
+        ).all()
+    )
+    add_audit_log(
+        db,
+        current_user.id,
+        "ticket.deleted",
+        "ticket",
+        record.id,
+        {"message": record.message, "comments_removed": comment_count},
+    )
+    db.execute(delete(TicketCommentRecord).where(TicketCommentRecord.ticket_id == str(ticket_id)))
+    db.delete(record)
+    db.commit()
 
 
 @app.post(
