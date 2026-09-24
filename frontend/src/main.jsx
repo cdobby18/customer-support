@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useState } from "react";
-import { Activity, ArrowRight, Check, CircleAlert, Inbox, LogOut, MessageSquare, Plus, RefreshCw, Search, ShieldCheck, UserCog, UserRound, Gavel, AlertTriangle, Clock, CheckCircle2, XCircle, FileText, Eye, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
+import { Activity, ArrowRight, Check, CircleAlert, Inbox, LogOut, MessageSquare, Plus, RefreshCw, Search, ShieldAlert, ShieldCheck, UserCog, UserRound, Gavel, AlertTriangle, Clock, CheckCircle2, XCircle, FileText, Eye, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -15,6 +15,24 @@ async function apiRequest(path, options = {}, token = null) {
     throw new Error(detail || "Something went wrong");
   }
   return body;
+}
+
+function slaMinutesLeft(ticket) {
+  if (!ticket.sla_due_at) return Infinity;
+  return (new Date(ticket.sla_due_at) - new Date()) / (1000 * 60);
+}
+
+function slaStatus(ticket) {
+  if (!ticket.sla_due_at) return { label: "No SLA", class: "none" };
+  const minutes = slaMinutesLeft(ticket);
+  if (minutes < 0) return { label: "Overdue", class: "overdue" };
+  if (minutes < 120) return { label: `${Math.round(minutes)}m left`, class: "critical" };
+  if (minutes < 1440) return { label: `${Math.round(minutes / 60)}h left`, class: "warning" };
+  return { label: `${Math.round(minutes / 1440)}d left`, class: "ok" };
+}
+
+function isTicketSlaOverdue(ticket) {
+  return slaStatus(ticket).class === "overdue";
 }
 
 function AuthScreen({ onAuthenticated }) {
@@ -365,6 +383,7 @@ function AppShell({ session, onLogout }) {
   const [selectedId, setSelectedId] = useState(null);
   const [statusFilter, setStatusFilter] = useState("");
   const [query, setQuery] = useState("");
+  const [slaMode, setSlaMode] = useState("");
   const [newMessage, setNewMessage] = useState("");
   const [comment, setComment] = useState("");
   const [comments, setComments] = useState([]);
@@ -443,7 +462,24 @@ function AppShell({ session, onLogout }) {
     activeView === "conversations" ? ["resolved", "closed"].includes(ticket.status) :
     true
   );
-  const visibleTickets = viewTickets.filter((ticket) => `${ticket.message} ${ticket.intent} ${ticket.customer_id}`.toLowerCase().includes(query.toLowerCase()));
+  const slaViewTickets = viewTickets.filter((ticket) => {
+    if (ticket.status === "resolved" || ticket.status === "closed") return true;
+    const minutes = slaMinutesLeft(ticket);
+    if (slaMode === "overdue") return minutes < 0;
+    if (slaMode === "soon") return minutes >= 0 && minutes <= 1440;
+    return true;
+  });
+  const sortedViewTickets =
+    slaMode === "urgency"
+      ? [...slaViewTickets].sort((a, b) => {
+          const aResolved = a.status === "resolved" || a.status === "closed";
+          const bResolved = b.status === "resolved" || b.status === "closed";
+          if (aResolved || bResolved) return aResolved === bResolved ? 0 : aResolved ? 1 : -1;
+          if (slaMinutesLeft(a) === slaMinutesLeft(b)) return 0;
+          return slaMinutesLeft(a) - slaMinutesLeft(b);
+        })
+      : slaViewTickets;
+  const visibleTickets = sortedViewTickets.filter((ticket) => `${ticket.message} ${ticket.intent} ${ticket.customer_id}`.toLowerCase().includes(query.toLowerCase()));
   const shownTickets = expandTickets ? visibleTickets : visibleTickets.slice(0, 10);
 
 return (
@@ -468,14 +504,26 @@ return (
         ) : (
           <section className="desk-grid">
             <div className="ticket-column">
-              <div className="toolbar"><div className="search-box"><Search size={16} /><input placeholder="Search tickets" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="pending">Pending</option><option value="resolved">Resolved</option></select></div>
-              <div className="ticket-list">{loading ? <div className="empty-state">Loading queue...</div> : visibleTickets.length ? shownTickets.map((ticket) => <button className={`ticket-row ${ticket.id === selectedId ? "selected" : ""}`} key={ticket.id} onClick={() => setSelectedId(ticket.id)}><div className="ticket-row-top"><span className={`status-dot ${ticket.status}`} /> <strong>{ticket.intent.replace("_", " ")}</strong><span className={`priority ${ticket.priority}`}>{ticket.priority}</span></div><p>{ticket.message}</p><small>{ticket.customer_id} · {new Date(ticket.created_at).toLocaleDateString()}</small></button>) : <div className="empty-state"><Inbox size={28} /><strong>{activeView === "conversations" ? "No past conversations" : "No tickets here"}</strong><span>{activeView === "conversations" ? "Resolved and closed tickets will appear here." : "New conversations will appear in this queue."}</span></div>}{visibleTickets.length > 10 && <button className="show-more" onClick={() => setExpandTickets((value) => !value)}>{expandTickets ? "Show fewer" : `Show all ${visibleTickets.length} tickets`}</button>}</div>
+              <div className="toolbar"><div className="search-box"><Search size={16} /><input placeholder="Search tickets" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="pending">Pending</option><option value="resolved">Resolved</option></select><select value={slaMode} onChange={(event) => setSlaMode(event.target.value)}><option value="">All deadlines</option><option value="overdue">Overdue only</option><option value="soon">Due within 24h</option><option value="urgency">SLA urgency</option></select></div>
+              <div className="ticket-list">{loading ? <div className="empty-state">Loading queue...</div> : visibleTickets.length ? shownTickets.map((ticket) => { const sla = slaStatus(ticket); return <button className={`ticket-row ${ticket.id === selectedId ? "selected" : ""} ${isTicketSlaOverdue(ticket) ? "overdue" : ""}`} key={ticket.id} onClick={() => setSelectedId(ticket.id)}><div className="ticket-row-top"><span className={`status-dot ${ticket.status}`} /> <strong>{ticket.intent.replace("_", " ")}</strong>{isStaff && ticket.guardrail_status === "flagged" && <span className="guardrail-badge"><ShieldAlert size={12} /> flagged</span>}<span className={`priority ${ticket.priority}`}>{ticket.priority}</span></div><p>{ticket.message}</p><div className="ticket-row-meta"><span className={`sla-chip ${sla.class}`} title={ticket.sla_due_at ? `SLA due ${new Date(ticket.sla_due_at).toLocaleString()}` : "No SLA deadline"}><Clock size={12} /> {sla.label}</span><small>{ticket.customer_id} · {new Date(ticket.created_at).toLocaleDateString()}</small></div></button>; }) : <div className="empty-state"><Inbox size={28} /><strong>{activeView === "conversations" ? "No past conversations" : "No tickets here"}</strong><span>{activeView === "conversations" ? "Resolved and closed tickets will appear here." : "New conversations will appear in this queue."}</span></div>}{visibleTickets.length > 10 && <button className="show-more" onClick={() => setExpandTickets((value) => !value)}>{expandTickets ? "Show fewer" : `Show all ${visibleTickets.length} tickets`}</button>}</div>
               {!isStaff && <form className="new-ticket" onSubmit={createTicket}><label>Open a new conversation<textarea value={newMessage} onChange={(event) => setNewMessage(event.target.value)} placeholder="Tell us what happened..." rows="3" /></label><button className="secondary-button"><Plus size={16} /> Submit ticket</button></form>}
             </div>
             <div className="detail-column">{selectedTicket ? (
           <>
             <div className="detail-header"><div><span className="detail-kicker">Ticket {selectedTicket.id.slice(0, 8)}</span><h2>{selectedTicket.message}</h2><p className="muted">Created {new Date(selectedTicket.created_at).toLocaleString()} · {selectedTicket.channel}</p></div><div className="detail-header-actions"><span className={`priority large ${selectedTicket.priority}`}>{selectedTicket.priority}</span>{isStaff && <button className="trash-button" onClick={deleteTicket} title="Delete ticket"><Trash2 size={16} /></button>}</div></div>
-            <div className="detail-meta"><div><span>Intent</span><strong>{selectedTicket.intent.replace("_", " ")}</strong></div><div><span>Customer</span><strong>{selectedTicket.customer_id}</strong></div><div><span>Review</span><strong>{selectedTicket.requires_human_review ? "Human review" : "Automated"}</strong></div></div>
+            <div className="detail-meta"><div><span>Intent</span><strong>{selectedTicket.intent.replace("_", " ")}</strong></div><div><span>Customer</span><strong>{selectedTicket.customer_id}</strong></div><div><span>Review</span><strong>{selectedTicket.requires_human_review ? "Human review" : "Automated"}</strong></div><div><span>Guardrail</span><strong>{selectedTicket.guardrail_status === "flagged" ? `Flagged (${selectedTicket.guardrail_hits?.length || 0})` : "Clean"}</strong></div></div>
+            {isStaff && selectedTicket.guardrail_hits?.length > 0 && (
+              <div className="guardrail-flags">
+                <h4><ShieldAlert size={15} /> Guardrail warnings</h4>
+                {selectedTicket.guardrail_hits.map((hit, index) => (
+                  <div className={`guardrail-flag ${hit.severity}`} key={index}>
+                    <span className="guardrail-type">{hit.rule_type}</span>
+                    <span className="guardrail-category">{hit.category}</span>
+                    <code title={hit.description}>{hit.matched.slice(0, 40)}</code>
+                  </div>
+                ))}
+              </div>
+            )}
             {isStaff && <div className="status-actions"><span>Move ticket</span>{["open", "in_progress", "pending", "resolved", "closed"].map((status) => <button className={selectedTicket.status === status ? "active" : ""} key={status} onClick={() => updateTicket(status)}>{status.replace("_", " ")}</button>)}</div>}
             <div className="conversation"><div className="conversation-heading"><h3>Conversation</h3><span>{comments.length} messages</span></div>{comments.length ? comments.map((item) => <article className={`message ${item.is_internal ? "internal" : ""}`} key={item.id}><div className="message-avatar"><UserRound size={15} /></div><div><div className="message-meta"><strong>{item.author_id === session.user.id ? "You" : item.author_id}</strong>{item.is_internal && <span>Internal note</span>}<time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></div></article>) : <div className="empty-conversation">No messages yet. Add the first reply.</div>}<form className="comment-form" onSubmit={addComment}><textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isStaff ? "Write an internal note..." : "Write a reply..."} rows="3" /><button className="primary-button">Send <ArrowRight size={16} /></button></form></div>
           </>

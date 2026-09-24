@@ -20,9 +20,18 @@ import redis
 from app.auth import create_access_token, decode_access_token, hash_password, verify_password
 from app.database import get_db, init_db
 from app.knowledge import KnowledgeMatch, search_knowledge
-from app.models import AuditLogRecord, TicketCommentRecord, TicketRecord, UserRecord, UserRole
+from app.models import (
+    AuditLogRecord,
+    FeedbackRecord,
+    TicketCommentRecord,
+    TicketRecord,
+    UserRecord,
+    UserRole,
+)
 from app.triage import TriageResult, classify_ticket
 from app.intake import normalize_message, NormalizedMessage, enrich_customer_context
+from app.guardrails import evaluate, PolicyReport
+from app.workers import enqueue_notification
 
 
 class TicketStatus(str, Enum):
@@ -95,6 +104,8 @@ class Ticket(TicketCreate):
     created_at: datetime
     updated_at: datetime
     intake_metadata: dict | None = None
+    guardrail_status: str = "clean"
+    guardrail_hits: list[dict] | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -140,6 +151,27 @@ class SlaMetrics(BaseModel):
     average_resolution_hours: float | None
 
 
+class FeedbackCreate(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class FeedbackResponse(BaseModel):
+    id: UUID
+    ticket_id: UUID
+    rating: int
+    comment: str | None
+    created_at: datetime
+
+
+class FeedbackAnalytics(BaseModel):
+    total_feedback: int
+    average_rating: float | None
+    rating_distribution: dict[int, int]
+    response_rate: float | None
+    deflection_rate: float | None
+
+
 class LoginResponse(BaseModel):
     authenticated: bool
     user: UserResponse
@@ -172,6 +204,8 @@ def to_ticket(record: TicketRecord) -> Ticket:
         created_at=record.created_at,
         updated_at=record.updated_at,
         intake_metadata=record.intake_metadata,
+        guardrail_status=record.guardrail_status,
+        guardrail_hits=[dict(hit) for hit in (record.guardrail_hits or [])] if record.guardrail_hits else None,
     )
 
 
@@ -182,6 +216,16 @@ def to_comment(record: TicketCommentRecord) -> TicketComment:
         author_id=record.author_id,
         body=record.body,
         is_internal=record.is_internal,
+        created_at=record.created_at,
+    )
+
+
+def to_feedback(record: FeedbackRecord) -> FeedbackResponse:
+    return FeedbackResponse(
+        id=UUID(record.id),
+        ticket_id=UUID(record.ticket_id),
+        rating=record.rating,
+        comment=record.comment,
         created_at=record.created_at,
     )
 
@@ -493,6 +537,45 @@ def sla_metrics(
     )
 
 
+@app.get("/admin/analytics/feedback", response_model=FeedbackAnalytics)
+def feedback_analytics(
+    _: UserRecord = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> FeedbackAnalytics:
+    records = db.scalars(select(TicketRecord)).all()
+    feedback_records = db.scalars(select(FeedbackRecord)).all()
+
+    ratings = [feedback.rating for feedback in feedback_records]
+    resolved_tickets = [record for record in records if record.resolved_at is not None]
+    resolved_ids = {record.id for record in resolved_tickets}
+
+    manually_handled_ids = {
+        record.id
+        for record in records
+        if record.reviewed_by is not None
+        or record.escalation_status
+        in {EscalationStatus.approved.value, EscalationStatus.rejected.value}
+        or record.first_response_at is not None
+    }
+    resolved_count = len(resolved_tickets)
+
+    return FeedbackAnalytics(
+        total_feedback=len(feedback_records),
+        average_rating=(
+            round(sum(ratings) / len(ratings), 2) if ratings else None
+        ),
+        rating_distribution={star: ratings.count(star) for star in range(1, 6)},
+        response_rate=(
+            round(len(feedback_records) / resolved_count, 4) if resolved_count else None
+        ),
+        deflection_rate=(
+            round((resolved_count - len(resolved_ids & manually_handled_ids)) / resolved_count, 4)
+            if resolved_count
+            else None
+        ),
+    )
+
+
 @app.patch("/admin/users/{user_id}", response_model=UserResponse)
 def update_user_status(
     user_id: UUID,
@@ -580,34 +663,41 @@ def create_ticket(
     if current_user.role == UserRole.customer.value and ticket_data.customer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Customers can only create their own tickets")
     triage_result = triage(ticket_data.message)
+    guardrail_report = evaluate(ticket_data.message, customer_email=current_user.email)
     now = datetime.now(timezone.utc)
-    escalation_status = (
-        EscalationStatus.pending
-        if triage_result.requires_human_review
-        else EscalationStatus.none
-    )
+    requires_review = triage_result.requires_human_review or guardrail_report.is_risky
+    escalation_status = EscalationStatus.pending if requires_review else EscalationStatus.none
+    if triage_result.requires_human_review:
+        escalation_reason = f"Sensitive {triage_result.intent.value} issue"
+    elif guardrail_report.is_risky:
+        guardrail_categories = sorted({violation.category for violation in guardrail_report.violations})
+        escalation_reason = "Guardrail: " + ", ".join(guardrail_categories)
+    else:
+        escalation_reason = None
     record = TicketRecord(
         id=str(uuid4()),
         intent=triage_result.intent.value,
         priority=triage_result.priority.value,
-        requires_human_review=triage_result.requires_human_review,
+        requires_human_review=requires_review,
         sentiment=triage_result.sentiment.value,
         confidence=triage_result.confidence,
         recommended_team=triage_result.recommended_team,
         triage_summary=triage_result.summary,
         escalation_status=escalation_status.value,
-        escalation_reason=(
-            f"Sensitive {triage_result.intent.value} issue"
-            if triage_result.requires_human_review
-            else None
-        ),
-        escalated_at=now if triage_result.requires_human_review else None,
+        escalation_reason=escalation_reason,
+        escalated_at=now if requires_review else None,
         reviewed_by=None,
         sla_due_at=sla_deadline(triage_result.priority.value, now),
         first_response_at=None,
         resolved_at=None,
         status=TicketStatus.open.value,
         assignee_id=None,
+        guardrail_status="flagged" if guardrail_report.violations else "clean",
+        guardrail_hits=(
+            [violation.model_dump() for violation in guardrail_report.violations]
+            if guardrail_report.violations
+            else None
+        ),
         created_at=now,
         updated_at=now,
         **ticket_data.model_dump(),
@@ -621,8 +711,32 @@ def create_ticket(
         record.id,
         {"intent": record.intent, "priority": record.priority},
     )
+    if guardrail_report.violations:
+        add_audit_log(
+            db,
+            current_user.id,
+            "ticket.guardrail_flagged",
+            "ticket",
+            record.id,
+            {
+                "status": record.guardrail_status,
+                "violation_count": len(guardrail_report.violations),
+                "types": sorted({violation.rule_type.value for violation in guardrail_report.violations}),
+            },
+        )
     db.commit()
     db.refresh(record)
+    enqueue_notification(
+        "ticket.created",
+        record.id,
+        {
+            "channel": record.channel,
+            "customer_id": record.customer_id,
+            "intent": record.intent,
+            "priority": record.priority,
+            "summary": record.message[:200],
+        },
+    )
     return to_ticket(record)
 
 
@@ -649,9 +763,21 @@ async def receive_channel_message(
     customer_context = enrich_customer_context(db, normalized.customer_id)
     normalized.customer_context = customer_context
 
+    customer_record = db.get(UserRecord, normalized.customer_id)
+    guardrail_report = evaluate(
+        normalized.message,
+        customer_email=customer_record.email if customer_record else None,
+    )
     triage_result = triage(normalized.message)
     now = datetime.now(timezone.utc)
-    requires_review = triage_result.requires_human_review
+    requires_review = triage_result.requires_human_review or guardrail_report.is_risky
+    if triage_result.requires_human_review:
+        escalation_reason = f"Sensitive {triage_result.intent.value} issue"
+    elif guardrail_report.is_risky:
+        guardrail_categories = sorted({violation.category for violation in guardrail_report.violations})
+        escalation_reason = "Guardrail: " + ", ".join(guardrail_categories)
+    else:
+        escalation_reason = None
     record = TicketRecord(
         id=str(uuid4()),
         customer_id=normalized.customer_id,
@@ -665,7 +791,7 @@ async def receive_channel_message(
         recommended_team=triage_result.recommended_team,
         triage_summary=triage_result.summary,
         escalation_status=EscalationStatus.pending.value if requires_review else EscalationStatus.none.value,
-        escalation_reason=f"Sensitive {triage_result.intent.value} issue" if requires_review else None,
+        escalation_reason=escalation_reason,
         escalated_at=now if requires_review else None,
         reviewed_by=None,
         sla_due_at=sla_deadline(triage_result.priority.value, now),
@@ -673,6 +799,12 @@ async def receive_channel_message(
         resolved_at=None,
         status=TicketStatus.open.value,
         assignee_id=None,
+        guardrail_status="flagged" if guardrail_report.violations else "clean",
+        guardrail_hits=(
+            [violation.model_dump() for violation in guardrail_report.violations]
+            if guardrail_report.violations
+            else None
+        ),
         created_at=now,
         updated_at=now,
         intake_metadata={
@@ -698,8 +830,33 @@ async def receive_channel_message(
             "attachment_count": len(normalized.attachments),
         },
     )
+    if guardrail_report.violations:
+        add_audit_log(
+            db,
+            None,
+            "ticket.guardrail_flagged",
+            "ticket",
+            record.id,
+            {
+                "status": record.guardrail_status,
+                "violation_count": len(guardrail_report.violations),
+                "types": sorted({violation.rule_type.value for violation in guardrail_report.violations}),
+            },
+        )
     db.commit()
     db.refresh(record)
+    enqueue_notification(
+        "ticket.received",
+        record.id,
+        {
+            "channel": channel,
+            "customer_id": record.customer_id,
+            "intent": record.intent,
+            "priority": record.priority,
+            "summary": record.message[:200],
+            "external_id": normalized.external_id,
+        },
+    )
     return to_ticket(record)
 
 
@@ -898,3 +1055,53 @@ def list_comments(
         .order_by(TicketCommentRecord.created_at)
     )
     return [to_comment(record) for record in db.scalars(query).all()]
+
+
+@app.post(
+    "/tickets/{ticket_id}/feedback",
+    response_model=FeedbackResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def submit_feedback(
+    ticket_id: UUID,
+    feedback: FeedbackCreate,
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FeedbackResponse:
+    ticket = db.get(TicketRecord, str(ticket_id))
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    ensure_ticket_access(ticket, current_user)
+    if ticket.status not in {TicketStatus.resolved.value, TicketStatus.closed.value}:
+        raise HTTPException(
+            status_code=400,
+            detail="Feedback can only be submitted for resolved tickets",
+        )
+    existing = db.scalar(
+        select(FeedbackRecord).where(FeedbackRecord.ticket_id == str(ticket_id))
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Feedback for this ticket already exists",
+        )
+
+    record = FeedbackRecord(
+        id=str(uuid4()),
+        ticket_id=str(ticket_id),
+        rating=feedback.rating,
+        comment=feedback.comment,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(record)
+    add_audit_log(
+        db,
+        current_user.id,
+        "ticket.feedback_submitted",
+        "ticket",
+        ticket.id,
+        {"rating": feedback.rating, "feedback_id": record.id},
+    )
+    db.commit()
+    db.refresh(record)
+    return to_feedback(record)
