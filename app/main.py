@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 import hmac
+import json
 import os
 import time
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import jwt
 from pydantic import BaseModel, EmailStr, Field
@@ -31,7 +34,16 @@ from app.models import (
 from app.triage import TriageResult, classify_ticket
 from app.intake import normalize_message, NormalizedMessage, enrich_customer_context
 from app.guardrails import evaluate, PolicyReport
+from app.integrations import sync_ticket_outbound
+from app.observability import (
+    RequestContextMiddleware,
+    get_app_logger,
+    setup_logging,
+    setup_tracing,
+)
 from app.workers import enqueue_notification
+
+setup_logging()
 
 
 class TicketStatus(str, Enum):
@@ -106,6 +118,8 @@ class Ticket(TicketCreate):
     intake_metadata: dict | None = None
     guardrail_status: str = "clean"
     guardrail_hits: list[dict] | None = None
+    external_id: str | None = None
+    thread_id: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -172,6 +186,55 @@ class FeedbackAnalytics(BaseModel):
     deflection_rate: float | None
 
 
+class SlaBreakdown(BaseModel):
+    total_tickets: int
+    open_tickets: int
+    in_progress_tickets: int
+    pending_tickets: int
+    overdue_tickets: int
+    resolved_tickets: int
+    average_resolution_hours: float | None
+
+
+class EscalationAnalytics(BaseModel):
+    total_escalated: int
+    pending_review: int
+    approved: int
+    rejected: int
+    escalation_rate: float | None
+
+
+class WorkloadItem(BaseModel):
+    assignee_id: str | None
+    assigned_tickets: int
+    resolved_tickets: int
+
+
+class ValueCount(BaseModel):
+    value: str
+    count: int
+
+
+class ConfidenceHistogram(BaseModel):
+    low: int = 0
+    medium: int = 0
+    high: int = 0
+    very_high: int = 0
+    average: float | None = None
+
+
+class DashboardAnalytics(BaseModel):
+    sla: SlaBreakdown
+    csat: FeedbackAnalytics
+    escalation: EscalationAnalytics
+    workload: list[WorkloadItem]
+    channels: list[ValueCount]
+    priorities: list[ValueCount]
+    intents: list[ValueCount]
+    sentiments: list[ValueCount]
+    confidence: ConfidenceHistogram
+
+
 class LoginResponse(BaseModel):
     authenticated: bool
     user: UserResponse
@@ -206,6 +269,8 @@ def to_ticket(record: TicketRecord) -> Ticket:
         intake_metadata=record.intake_metadata,
         guardrail_status=record.guardrail_status,
         guardrail_hits=[dict(hit) for hit in (record.guardrail_hits or [])] if record.guardrail_hits else None,
+        external_id=record.external_id,
+        thread_id=record.thread_id,
     )
 
 
@@ -272,7 +337,45 @@ def add_audit_log(
     )
 
 
+def _integration_ticket_payload(record: TicketRecord) -> dict:
+    return {
+        "id": record.id,
+        "subject": record.message[:120],
+        "message": record.message,
+        "status": record.status,
+        "priority": record.priority,
+        "intent": record.intent,
+        "channel": record.channel,
+    }
+
+
+def _record_integration_sync(
+    db: Session,
+    actor_id: str | None,
+    event: str,
+    record: TicketRecord,
+    sync_result: dict[str, object] | None,
+) -> None:
+    if sync_result is None:
+        return
+    details: dict[str, str | None] = {
+        "event": event,
+        "provider": str(sync_result.get("provider") or ""),
+        "status": str(sync_result.get("status") or "synced"),
+    }
+    for key in ("remote_id", "remote_comment_id", "reason"):
+        if sync_result.get(key):
+            details[key] = str(sync_result[key])
+    add_audit_log(db, actor_id, "integration.synced", "ticket", record.id, details)
+    db.commit()
+
+
 def validate_security_configuration() -> None:
+    provider = os.getenv("SUPPORT_TOOL_PROVIDER", "").strip().lower()
+    if provider and provider not in {"mock", "zendesk", "hubspot"}:
+        raise RuntimeError(
+            f"SUPPORT_TOOL_PROVIDER={provider!r} is invalid; expected one of: mock, zendesk, hubspot"
+        )
     if os.getenv("APP_ENV", "development").lower() != "production":
         return
     required_secrets = {
@@ -289,6 +392,7 @@ def validate_security_configuration() -> None:
 async def lifespan(_: FastAPI):
     validate_security_configuration()
     init_db()
+    setup_tracing(app)
     yield
 
 
@@ -313,6 +417,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestContextMiddleware, logger=get_app_logger())
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -320,9 +425,34 @@ def triage(message: str) -> TriageResult:
     return classify_ticket(message)
 
 
-def sla_deadline(priority: str, created_at: datetime) -> datetime:
+def sla_deadline(priority: str, created_at: datetime, channel: str = "web") -> datetime:
     hours_by_priority = {"urgent": 4, "high": 8, "normal": 24}
-    return created_at + timedelta(hours=hours_by_priority.get(priority, 24))
+    return created_at + timedelta(hours=hours_by_priority.get(priority, 24) * sla_channel_multiplier(channel))
+
+
+def sla_channel_multiplier(channel: str) -> float:
+    default_multipliers = {
+        "email": 1.0,
+        "web": 1.0,
+        "crm": 1.0,
+        "slack": 0.75,
+        "whatsapp": 0.5,
+        "chat": 0.5,
+    }
+    configured: dict[str, float] = {}
+    raw = os.getenv("SLA_CHANNEL_MULTIPLIERS", "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                configured = {str(key): float(value) for key, value in parsed.items()}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            configured = {}
+    multiplier = configured.get(channel, default_multipliers.get(channel, 1.0))
+    try:
+        return float(multiplier)
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def as_utc(value: datetime) -> datetime:
@@ -337,6 +467,7 @@ def webhook_secret_is_valid(provided_secret: str | None) -> bool:
 
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+AUDIT_LOG_RETENTION_DAYS = max(1, int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365")))
 _rate_limiter_redis: redis.Redis | None = None
 _rate_limiter_memory: dict[str, list[float]] = {}
 
@@ -379,6 +510,107 @@ def enforce_webhook_rate_limit(request: Request) -> None:
             raise HTTPException(status_code=429, detail="Webhook rate limit exceeded")
         request_times.append(now)
         _rate_limiter_memory[client_host] = request_times
+
+
+def find_ticket_by_external_id(db: Session, channel: str, external_id: str) -> TicketRecord | None:
+    return db.scalar(
+        select(TicketRecord).where(
+            TicketRecord.channel == channel,
+            TicketRecord.external_id == external_id,
+        )
+    )
+
+
+def find_comment_by_external_id(db: Session, external_id: str) -> TicketCommentRecord | None:
+    return db.scalar(
+        select(TicketCommentRecord).where(TicketCommentRecord.external_id == external_id)
+    )
+
+
+def find_open_thread_ticket(db: Session, channel: str, thread_id: str) -> TicketRecord | None:
+    return db.scalar(
+        select(TicketRecord)
+        .where(
+            TicketRecord.channel == channel,
+            TicketRecord.thread_id == thread_id,
+            TicketRecord.status.in_(
+                {
+                    TicketStatus.open.value,
+                    TicketStatus.in_progress.value,
+                    TicketStatus.pending.value,
+                }
+            ),
+        )
+        .order_by(TicketRecord.created_at.desc())
+    )
+
+
+def handle_thread_reply(
+    db: Session,
+    ticket: TicketRecord,
+    normalized: NormalizedMessage,
+    channel: str,
+    customer_email: str | None,
+) -> TicketRecord:
+    guardrail_report = evaluate(normalized.message, customer_email=customer_email)
+    now = datetime.now(timezone.utc)
+    db.add(
+        TicketCommentRecord(
+            id=str(uuid4()),
+            ticket_id=ticket.id,
+            author_id=normalized.customer_id,
+            body=normalized.message,
+            is_internal=False,
+            external_id=normalized.external_id,
+            created_at=now,
+        )
+    )
+    status_changed = []
+    if ticket.status == TicketStatus.pending.value:
+        ticket.status = TicketStatus.open.value
+        status_changed.append(TicketStatus.pending.value)
+    ticket.updated_at = now
+    if guardrail_report.is_risky:
+        ticket.requires_human_review = True
+        if ticket.escalation_status == EscalationStatus.none.value:
+            ticket.escalation_status = EscalationStatus.pending.value
+            ticket.escalated_at = now
+            guardrail_categories = sorted({violation.category for violation in guardrail_report.violations})
+            ticket.escalation_reason = "Guardrail: " + ", ".join(guardrail_categories)
+        if guardrail_report.violations:
+            ticket.guardrail_status = "flagged"
+            ticket.guardrail_hits = [
+                violation.model_dump() for violation in guardrail_report.violations
+            ]
+    add_audit_log(
+        db,
+        None,
+        "channel.thread_reply",
+        "ticket",
+        ticket.id,
+        {
+            "channel": channel,
+            "external_id": normalized.external_id,
+            "thread_id": normalized.thread_id,
+            "status_changed": status_changed,
+        },
+    )
+    if guardrail_report.violations:
+        add_audit_log(
+            db,
+            None,
+            "ticket.guardrail_flagged",
+            "ticket",
+            ticket.id,
+            {
+                "status": ticket.guardrail_status,
+                "violation_count": len(guardrail_report.violations),
+                "types": sorted({violation.rule_type.value for violation in guardrail_report.violations}),
+            },
+        )
+    db.commit()
+    db.refresh(ticket)
+    return ticket
 
 
 @app.get("/health")
@@ -503,6 +735,24 @@ def list_audit_logs(
     return [to_audit_log(record) for record in db.scalars(query).all()]
 
 
+class PurgeAuditLogsResponse(BaseModel):
+    deleted: int
+    retention_days: int
+
+
+@app.post("/admin/audit-logs/purge", response_model=PurgeAuditLogsResponse)
+def purge_audit_logs(
+    _: UserRecord = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> PurgeAuditLogsResponse:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=AUDIT_LOG_RETENTION_DAYS)
+    deleted = db.execute(
+        delete(AuditLogRecord).where(AuditLogRecord.created_at < cutoff)
+    ).rowcount
+    db.commit()
+    return PurgeAuditLogsResponse(deleted=deleted, retention_days=AUDIT_LOG_RETENTION_DAYS)
+
+
 @app.get("/admin/analytics/sla", response_model=SlaMetrics)
 def sla_metrics(
     _: UserRecord = Depends(require_admin),
@@ -572,6 +822,139 @@ def feedback_analytics(
             round((resolved_count - len(resolved_ids & manually_handled_ids)) / resolved_count, 4)
             if resolved_count
             else None
+        ),
+    )
+
+
+@app.get("/admin/analytics/dashboard", response_model=DashboardAnalytics)
+def analytics_dashboard(
+    _: UserRecord = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> DashboardAnalytics:
+    records = db.scalars(select(TicketRecord)).all()
+    feedback_records = db.scalars(select(FeedbackRecord)).all()
+    now = datetime.now(timezone.utc)
+
+    open_statuses = {TicketStatus.open.value, TicketStatus.in_progress.value, TicketStatus.pending.value}
+    resolved_statuses = {TicketStatus.resolved.value, TicketStatus.closed.value}
+    resolved_records = [record for record in records if record.resolved_at is not None]
+    resolution_hours = [
+        (as_utc(record.resolved_at) - as_utc(record.created_at)).total_seconds() / 3600
+        for record in resolved_records
+    ]
+
+    ratings = [feedback.rating for feedback in feedback_records]
+    resolved_ids = {record.id for record in resolved_records}
+    manually_handled_ids = {
+        record.id
+        for record in records
+        if record.reviewed_by is not None
+        or record.escalation_status
+        in {EscalationStatus.approved.value, EscalationStatus.rejected.value}
+        or record.first_response_at is not None
+    }
+    resolved_count = len(resolved_records)
+
+    escalated_records = [
+        record for record in records if record.escalation_status != EscalationStatus.none.value
+    ]
+    pending_review_count = sum(
+        record.escalation_status == EscalationStatus.pending.value for record in escalated_records
+    )
+    approved_count = sum(
+        record.escalation_status == EscalationStatus.approved.value for record in escalated_records
+    )
+    rejected_count = sum(
+        record.escalation_status == EscalationStatus.rejected.value for record in escalated_records
+    )
+
+    workload_by_assignee: dict[str, list[int]] = {}
+    for record in records:
+        assignee = record.assignee_id or "unassigned"
+        entry = workload_by_assignee.setdefault(assignee, [0, 0])
+        entry[0] += 1
+        if record.status in resolved_statuses:
+            entry[1] += 1
+    workload = [
+        WorkloadItem(
+            assignee_id=None if assignee == "unassigned" else assignee,
+            assigned_tickets=counts[0],
+            resolved_tickets=counts[1],
+        )
+        for assignee, counts in sorted(
+            workload_by_assignee.items(), key=lambda item: item[1][0], reverse=True
+        )
+    ]
+
+    total_records = len(records)
+    confidence_values = [record.confidence for record in records if record.confidence is not None]
+    confidence_bins = {
+        "low": sum(1 for value in confidence_values if value < 0.7),
+        "medium": sum(1 for value in confidence_values if 0.7 <= value < 0.8),
+        "high": sum(1 for value in confidence_values if 0.8 <= value < 0.9),
+        "very_high": sum(1 for value in confidence_values if value >= 0.9),
+    }
+
+    def value_counts(field: str) -> list[ValueCount]:
+        counter = Counter(getattr(record, field) for record in records)
+        return [ValueCount(value=value, count=count) for value, count in counter.most_common()]
+
+    return DashboardAnalytics(
+        sla=SlaBreakdown(
+            total_tickets=total_records,
+            open_tickets=sum(record.status in open_statuses for record in records),
+            in_progress_tickets=sum(record.status == TicketStatus.in_progress.value for record in records),
+            pending_tickets=sum(record.status == TicketStatus.pending.value for record in records),
+            overdue_tickets=sum(
+                record.sla_due_at is not None
+                and as_utc(record.sla_due_at) < now
+                and record.status not in resolved_statuses
+                for record in records
+            ),
+            resolved_tickets=resolved_count,
+            average_resolution_hours=(
+                round(sum(resolution_hours) / len(resolution_hours), 2)
+                if resolution_hours
+                else None
+            ),
+        ),
+        csat=FeedbackAnalytics(
+            total_feedback=len(feedback_records),
+            average_rating=round(sum(ratings) / len(ratings), 2) if ratings else None,
+            rating_distribution={star: ratings.count(star) for star in range(1, 6)},
+            response_rate=(
+                round(len(feedback_records) / resolved_count, 4) if resolved_count else None
+            ),
+            deflection_rate=(
+                round((resolved_count - len(resolved_ids & manually_handled_ids)) / resolved_count, 4)
+                if resolved_count
+                else None
+            ),
+        ),
+        escalation=EscalationAnalytics(
+            total_escalated=len(escalated_records),
+            pending_review=pending_review_count,
+            approved=approved_count,
+            rejected=rejected_count,
+            escalation_rate=(
+                round(len(escalated_records) / total_records, 4) if total_records else None
+            ),
+        ),
+        workload=workload,
+        channels=value_counts("channel"),
+        priorities=value_counts("priority"),
+        intents=value_counts("intent"),
+        sentiments=value_counts("sentiment"),
+        confidence=ConfidenceHistogram(
+            low=confidence_bins["low"],
+            medium=confidence_bins["medium"],
+            high=confidence_bins["high"],
+            very_high=confidence_bins["very_high"],
+            average=(
+                round(sum(confidence_values) / len(confidence_values), 4)
+                if confidence_values
+                else None
+            ),
         ),
     )
 
@@ -687,7 +1070,7 @@ def create_ticket(
         escalation_reason=escalation_reason,
         escalated_at=now if requires_review else None,
         reviewed_by=None,
-        sla_due_at=sla_deadline(triage_result.priority.value, now),
+        sla_due_at=sla_deadline(triage_result.priority.value, now, ticket_data.channel),
         first_response_at=None,
         resolved_at=None,
         status=TicketStatus.open.value,
@@ -737,6 +1120,13 @@ def create_ticket(
             "summary": record.message[:200],
         },
     )
+    _record_integration_sync(
+        db,
+        current_user.id,
+        "ticket.created",
+        record,
+        sync_ticket_outbound(db, record, "ticket.created", ticket_payload=_integration_ticket_payload(record)),
+    )
     return to_ticket(record)
 
 
@@ -764,9 +1154,52 @@ async def receive_channel_message(
     normalized.customer_context = customer_context
 
     customer_record = db.get(UserRecord, normalized.customer_id)
+    customer_email = customer_record.email if customer_record else None
+
+    if normalized.external_id:
+        existing_ticket = find_ticket_by_external_id(db, channel, normalized.external_id)
+        if existing_ticket is not None:
+            return JSONResponse(
+                content=to_ticket(existing_ticket).model_dump(mode="json"),
+                status_code=200,
+            )
+        existing_comment = find_comment_by_external_id(db, normalized.external_id)
+        if existing_comment is not None:
+            parent_ticket = db.get(TicketRecord, existing_comment.ticket_id)
+            if parent_ticket is not None:
+                return JSONResponse(
+                    content=to_ticket(parent_ticket).model_dump(mode="json"),
+                    status_code=200,
+                )
+
+    if normalized.thread_id:
+        open_thread = find_open_thread_ticket(db, channel, normalized.thread_id)
+        if open_thread is not None:
+            thread_reply = handle_thread_reply(
+                db,
+                open_thread,
+                normalized,
+                channel,
+                customer_email,
+            )
+            enqueue_notification(
+                "thread.reply",
+                open_thread.id,
+                {
+                    "channel": channel,
+                    "external_id": normalized.external_id,
+                    "thread_id": normalized.thread_id,
+                    "summary": normalized.message[:200],
+                },
+            )
+            return JSONResponse(
+                content=to_ticket(thread_reply).model_dump(mode="json"),
+                status_code=200,
+            )
+
     guardrail_report = evaluate(
         normalized.message,
-        customer_email=customer_record.email if customer_record else None,
+        customer_email=customer_email,
     )
     triage_result = triage(normalized.message)
     now = datetime.now(timezone.utc)
@@ -794,7 +1227,7 @@ async def receive_channel_message(
         escalation_reason=escalation_reason,
         escalated_at=now if requires_review else None,
         reviewed_by=None,
-        sla_due_at=sla_deadline(triage_result.priority.value, now),
+        sla_due_at=sla_deadline(triage_result.priority.value, now, channel),
         first_response_at=None,
         resolved_at=None,
         status=TicketStatus.open.value,
@@ -805,6 +1238,8 @@ async def receive_channel_message(
             if guardrail_report.violations
             else None
         ),
+        external_id=normalized.external_id,
+        thread_id=normalized.thread_id,
         created_at=now,
         updated_at=now,
         intake_metadata={
@@ -813,7 +1248,7 @@ async def receive_channel_message(
             "attachments": [att.model_dump() for att in normalized.attachments],
             "channel_metadata": normalized.channel_metadata,
             "received_at": normalized.received_at.isoformat(),
-            "customer_context": customer_context.model_dump() if customer_context else None,
+            "customer_context": customer_context.model_dump(mode="json") if customer_context else None,
         },
     )
     db.add(record)
@@ -856,6 +1291,13 @@ async def receive_channel_message(
             "summary": record.message[:200],
             "external_id": normalized.external_id,
         },
+    )
+    _record_integration_sync(
+        db,
+        None,
+        "ticket.received",
+        record,
+        sync_ticket_outbound(db, record, "ticket.received", ticket_payload=_integration_ticket_payload(record)),
     )
     return to_ticket(record)
 
@@ -963,6 +1405,16 @@ def update_ticket(
     record.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(record)
+    if "status" in updated_fields or "assignee_id" in updated_fields:
+        _record_integration_sync(
+            db,
+            current_user.id,
+            "ticket.updated",
+            record,
+            sync_ticket_outbound(
+                db, record, "ticket.updated", ticket_payload=_integration_ticket_payload(record)
+            ),
+        )
     return to_ticket(record)
 
 
@@ -1036,6 +1488,24 @@ def add_comment(
     )
     db.commit()
     db.refresh(record)
+    if not record.is_internal:
+        _record_integration_sync(
+            db,
+            current_user.id,
+            "ticket.comment_added",
+            ticket,
+            sync_ticket_outbound(
+                db,
+                ticket,
+                "ticket.comment_added",
+                comment_payload={
+                    "id": record.id,
+                    "body": record.body,
+                    "is_internal": record.is_internal,
+                    "author_id": record.author_id,
+                },
+            ),
+        )
     return to_comment(record)
 
 

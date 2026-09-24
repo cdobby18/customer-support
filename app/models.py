@@ -64,6 +64,8 @@ class TicketRecord(Base):
     intake_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     guardrail_status: Mapped[str] = mapped_column(String(20), default="clean", index=True)
     guardrail_hits: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
 
 class TicketCommentRecord(Base):
@@ -74,6 +76,7 @@ class TicketCommentRecord(Base):
     author_id: Mapped[str] = mapped_column(String(255))
     body: Mapped[str] = mapped_column(Text)
     is_internal: Mapped[bool] = mapped_column(Boolean, default=False)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
