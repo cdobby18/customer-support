@@ -1,5 +1,4 @@
 from enum import Enum
-import json
 
 from pydantic import BaseModel, Field
 

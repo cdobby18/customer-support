@@ -34,11 +34,7 @@ from app.models import (
 )
 from app.triage import TriageResult, classify_ticket
 from app.intake import normalize_message, NormalizedMessage, enrich_customer_context
-from app.guardrails import (
-    evaluate,
-    PolicyReport,
-    Violation,
-)
+from app.guardrails import evaluate
 from app.integrations import sync_ticket_outbound
 from app.llm import (
     get_llm_usage_summary,

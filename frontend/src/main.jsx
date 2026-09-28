@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useState } from "react";
-import { Activity, AlertTriangle, ArrowRight, BarChart3, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Clock, Eye, FileText, Gauge, Gavel, Hash, Inbox, LifeBuoy, LogOut, MessageSquare, Plus, RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Star, Timer, Trash2, TrendingUp, UserCog, UserRound, Users, X, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, BarChart3, BookOpen, Check, CheckCircle2, CircleAlert, Clock, Eye, FileText, Gauge, Gavel, Hash, Inbox, LifeBuoy, LogOut, MessageSquare, Plus, RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Star, Timer, Trash2, TrendingUp, UserCog, UserRound, Users, X, XCircle } from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
