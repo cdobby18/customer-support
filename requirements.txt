@@ -1,7 +1,20 @@
+# Runtime dependencies for the API and Celery worker.
+#
+# Development and test tooling lives in requirements-dev.txt.
+#
+# Every version is a bounded range rather than an exact pin. A generated
+# pip-compile lock was evaluated and deliberately not committed: resolving
+# this set (torch + faiss + sentence-transformers) backtracks numpy to 1.26.4
+# even though nothing caps it below 2.x and the working environment runs
+# 2.5.3, so the result could not be verified as correct. An unverified lock
+# is worse than no lock. The frontend, where package-lock.json is sound,
+# does install reproducibly via `npm ci`.
+#
+# Note: installing this pulls torch, so expect a large download. CI caches
+# the pip cache directory to keep the job fast.
+
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
-pytest>=8.0,<9.0
-httpx>=0.27,<1.0
 SQLAlchemy>=2.0,<3.0
 psycopg[binary]>=3.2,<4.0
 alembic>=1.13,<2.0
@@ -12,9 +25,12 @@ redis>=5.0,<6.0
 celery>=5.5,<6.0
 sentence-transformers>=3.0,<4.0
 faiss-cpu>=1.8,<2.0
-numpy>=1.24,<2.0
+# Upper bound raised to <3.0: this was pinned <2.0, but faiss-cpu 1.15 and
+# sentence-transformers 3.4 run on numpy 2.x and the working environment is
+# on 2.5.3. The stale cap made pip resolve back to 1.26.4, which has no
+# Python 3.14 wheels.
+numpy>=1.26,<3.0
 opentelemetry-api>=1.27,<2.0
 opentelemetry-sdk>=1.27,<2.0
 opentelemetry-exporter-otlp-proto-http>=1.27,<2.0
 opentelemetry-instrumentation-fastapi>=0.48b0,<1.0
-locust>=2.29,<3.0

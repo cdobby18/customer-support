@@ -1,0 +1,21 @@
+# Development and test tooling. Installs the runtime deps too, so a fresh
+# clone only needs:
+#   pip install -r requirements-dev.txt
+#
+# Lower bound on pytest is 9.0.3: that is the first release fixing
+# PYSEC-2026-1845. Do not relax it back below 9.x.
+
+-r requirements.txt
+
+# Test runner. TestClient needs httpx, which the runtime does not use.
+pytest>=9.0.3,<10.0
+httpx>=0.27,<1.0
+
+# Coverage. CI enforces the floor in pytest.ini (addopts --cov-fail-under).
+coverage>=7.6,<8.0
+
+# Dependency vulnerability scanning (pip-audit).
+pip-audit>=2.7,<3.0
+
+# Load testing. Used by load_tests/locustfile.py, not by the test suite.
+locust>=2.29,<3.0

@@ -1,6 +1,16 @@
 __pycache__/
 .pytest_cache/
 .venv/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Throwaway SQLite file used by the CI e2e job
+.ci-e2e.db
+
 support.db
 frontend/node_modules/
 frontend/dist/
