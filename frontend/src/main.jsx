@@ -1,9 +1,15 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useState } from "react";
-import { Activity, ArrowRight, BarChart3, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Clock, Eye, FileText, Gauge, Gavel, Hash, Inbox, LifeBuoy, LogOut, MessageSquare, Plus, RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Star, Timer, Trash2, TrendingUp, UserCog, UserRound, Users, X, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, BarChart3, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Clock, Eye, FileText, Gauge, Gavel, Hash, Inbox, LifeBuoy, LogOut, MessageSquare, Plus, RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Star, Timer, Trash2, TrendingUp, UserCog, UserRound, Users, X, XCircle } from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+let onSessionExpired = null;
+
+function setSessionExpiredHandler(handler) {
+  onSessionExpired = handler;
+}
 
 async function apiRequest(path, options = {}, token = null) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
@@ -11,6 +17,7 @@ async function apiRequest(path, options = {}, token = null) {
   const response = await fetch(`${API_URL}${path}`, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401 && token && onSessionExpired) onSessionExpired();
     const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
     throw new Error(detail || "Something went wrong");
   }
@@ -43,7 +50,7 @@ const TOPIC_PRESETS = {
   "Other": "",
 };
 
-function AuthScreen({ onAuthenticated }) {
+function AuthScreen({ onAuthenticated, banner }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -89,6 +96,7 @@ function AuthScreen({ onAuthenticated }) {
         <form onSubmit={submit} className="auth-form">
           <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="user@gmail.com" required /></label>
           <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" minLength="8" required /></label>
+          {banner && <div className="error-box"><CircleAlert size={16} /> {banner}</div>}
           {error && <div className="error-box"><CircleAlert size={16} /> {error}</div>}
           <button className="primary-button" disabled={loading}>{loading ? "Working..." : mode === "login" ? "Open support desk" : "Create account"}<ArrowRight size={17} /></button>
         </form>
@@ -1056,11 +1064,45 @@ return (
   );
 }
 
-export default function App() {
-  const [session, setSession] = useState(() => JSON.parse(localStorage.getItem("relay-session") || "null"));
-  const handleAuthenticated = (nextSession) => { localStorage.setItem("relay-session", JSON.stringify(nextSession)); setSession(nextSession); };
-  const logout = () => { localStorage.removeItem("relay-session"); setSession(null); };
-  return session ? <AppShell session={session} onLogout={logout} /> : <AuthScreen onAuthenticated={handleAuthenticated} />;
+const SESSION_KEY = "relay-session";
+
+function readStoredSession() {
+  const raw = localStorage.getItem(SESSION_KEY);
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    localStorage.removeItem(SESSION_KEY);
+    return null;
+  }
+  const user = parsed && typeof parsed === "object" ? parsed.user : null;
+  const valid =
+    typeof parsed?.access_token === "string" &&
+    parsed.access_token.length > 0 &&
+    user !== null &&
+    typeof user === "object" &&
+    typeof user.id === "string" &&
+    typeof user.email === "string" &&
+    typeof user.role === "string";
+  if (!valid) {
+    localStorage.removeItem(SESSION_KEY);
+    return null;
+  }
+  return parsed;
 }
+
+export default function App() {
+  const [session, setSession] = useState(readStoredSession);
+  const [banner, setBanner] = useState("");
+  const handleAuthenticated = (nextSession) => { localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession)); setBanner(""); setSession(nextSession); };
+  const logout = () => { localStorage.removeItem(SESSION_KEY); setSession(null); };
+  useEffect(() => {
+    setSessionExpiredHandler(() => { setBanner("Your session expired. Please sign in again."); logout(); });
+    return () => setSessionExpiredHandler(null);
+  }, []);
+  return session ? <AppShell session={session} onLogout={logout} /> : <AuthScreen onAuthenticated={handleAuthenticated} banner={banner} />;
+}
+
 
 createRoot(document.getElementById("root")).render(<App />);
