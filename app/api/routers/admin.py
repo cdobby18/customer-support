@@ -10,18 +10,10 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.auth import hash_password
-from app.database import get_db
-from app.dependencies import require_admin
-from app.llm import get_llm_usage_summary, reset_llm_usage
-from app.models import (
-    AuditLogRecord,
-    FeedbackRecord,
-    TicketRecord,
-    UserRecord,
-    UserRole,
-)
-from app.schemas import (
+from app.agents.llm import get_llm_usage_summary, reset_llm_usage
+from app.agents.support import as_utc
+from app.api.dependencies import require_admin
+from app.api.schemas import (
     AuditLogResponse,
     ConfidenceHistogram,
     DashboardAnalytics,
@@ -41,7 +33,15 @@ from app.schemas import (
     to_audit_log,
     to_user,
 )
-from app.support import as_utc
+from app.core.database import get_db
+from app.core.models import (
+    AuditLogRecord,
+    FeedbackRecord,
+    TicketRecord,
+    UserRecord,
+    UserRole,
+)
+from app.security.auth import hash_password
 
 AUDIT_LOG_RETENTION_DAYS = max(1, int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365")))
 

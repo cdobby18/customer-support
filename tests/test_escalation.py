@@ -1,6 +1,6 @@
 import pytest
 
-from app import llm, escalation
+from app.agents import llm, escalation
 
 
 class FakeLLMProvider(llm.LLMProvider):

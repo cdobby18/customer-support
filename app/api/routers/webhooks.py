@@ -19,31 +19,31 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auto_response import _maybe_auto_respond
-from app.database import get_db
-from app.guardrails import evaluate
-from app.integrations import sync_ticket_outbound
-from app.intake import NormalizedMessage, enrich_customer_context, normalize_message
-from app.models import (
-    TicketCommentRecord,
-    TicketRecord,
-    UserRecord,
-)
-from app.schemas import (
-    EscalationStatus,
-    Ticket,
-    TicketStatus,
-    add_audit_log,
-    to_ticket,
-)
-from app.support import (
+from app.agents.auto_response import _maybe_auto_respond
+from app.agents.guardrails import evaluate
+from app.agents.intake import NormalizedMessage, enrich_customer_context, normalize_message
+from app.agents.integrations import sync_ticket_outbound
+from app.agents.support import (
     _integration_ticket_payload,
     _record_integration_sync,
     build_escalation_intelligence,
     sla_deadline,
     triage,
 )
-from app.workers import enqueue_notification
+from app.api.schemas import (
+    EscalationStatus,
+    Ticket,
+    TicketStatus,
+    add_audit_log,
+    to_ticket,
+)
+from app.core.database import get_db
+from app.core.models import (
+    TicketCommentRecord,
+    TicketRecord,
+    UserRecord,
+)
+from app.core.workers import enqueue_notification
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 _rate_limiter_redis: redis.Redis | None = None

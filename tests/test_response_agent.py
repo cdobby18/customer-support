@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from app import llm, response_agent
-from app.knowledge import KnowledgeMatch
+from app.agents import llm, response_agent
+from app.agents.knowledge import KnowledgeMatch
 
 
 def kb_matches() -> list[KnowledgeMatch]:

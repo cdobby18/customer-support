@@ -6,10 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app import agent_assist, llm
-from app.database import Base
-from app.knowledge import KnowledgeMatch
-from app.models import TicketCommentRecord, TicketRecord
+from app.agents import agent_assist, llm
+from app.agents.knowledge import KnowledgeMatch
+from app.core.database import Base
+from app.core.models import TicketCommentRecord, TicketRecord
 
 from uuid import uuid4
 

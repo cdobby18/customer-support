@@ -11,7 +11,8 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
-from app.models import (
+from app.agents.response_agent import DraftResult
+from app.core.models import (
     AuditLogRecord,
     FeedbackRecord,
     TicketCommentRecord,
@@ -19,7 +20,6 @@ from app.models import (
     UserRecord,
     UserRole,
 )
-from app.response_agent import DraftResult
 
 class TicketStatus(str, Enum):
     open = "open"

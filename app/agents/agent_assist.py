@@ -20,11 +20,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.guardrails import Violation, validate_response
-from app.knowledge import KnowledgeMatch, search_knowledge, tokenize
-from app.llm import LLMError, LLMNotConfigured, LLMProvider, generate
-from app.models import TicketRecord
-from app.prompts import get_template
+from app.agents.guardrails import Violation, validate_response
+from app.agents.knowledge import KnowledgeMatch, search_knowledge, tokenize
+from app.agents.llm import LLMError, LLMNotConfigured, LLMProvider, generate
+from app.agents.prompts import get_template
+from app.core.models import TicketRecord
 
 # Tickets in these states are the pool of "similar resolved cases".
 RESOLVED_STATES = ("resolved", "closed")

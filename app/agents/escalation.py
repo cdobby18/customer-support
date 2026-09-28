@@ -15,8 +15,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.llm import generate, LLMNotConfigured, LLMError
-from app.prompts import get_template
+from app.agents.llm import generate, LLMNotConfigured, LLMError
+from app.agents.prompts import get_template
 
 
 class EscalationRiskLevel(str, Enum):

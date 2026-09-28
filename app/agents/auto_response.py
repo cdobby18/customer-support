@@ -1,7 +1,7 @@
 """Automatic first-response behaviour for AI-handled tickets.
 
 Kept out of app/main.py (and out of the route module) because it is business
-logic rather than HTTP handling: app/routers/tickets.py and the intake/webhook
+logic rather than HTTP handling: app/api/routers/tickets.py and the intake/webhook
 paths all trigger it.
 """
 
@@ -11,21 +11,21 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from app.llm import LLMConfigError, LLMError
-from app.models import TicketCommentRecord, TicketRecord
-from app.response_agent import draft_reply
-from app.schemas import (
+from app.agents.llm import LLMConfigError, LLMError
+from app.agents.response_agent import draft_reply
+from app.agents.support import (
+    as_utc,
+    build_escalation_intelligence,
+    customer_context_from_record,
+)
+from app.api.schemas import (
     AI_ASSISTANT_ID,
     AutoRespondResponse,
     EscalationStatus,
     TicketStatus,
     add_audit_log,
 )
-from app.support import (
-    as_utc,
-    build_escalation_intelligence,
-    customer_context_from_record,
-)
+from app.core.models import TicketCommentRecord, TicketRecord
 
 
 def auto_respond_enabled() -> bool:

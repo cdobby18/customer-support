@@ -353,7 +353,7 @@ def normalize_message(channel: str, raw_payload: dict[str, Any]) -> NormalizedMe
 
 
 def enrich_customer_context(db: Session, customer_id: str) -> CustomerContext:
-    from app.models import TicketRecord, UserRecord
+    from app.core.models import TicketRecord, UserRecord
     from sqlalchemy import select, func
 
     user = db.get(UserRecord, customer_id)

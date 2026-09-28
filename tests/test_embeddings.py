@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app import embeddings as emb
+from app.agents import embeddings as emb
 
 
 @pytest.fixture(autouse=True)

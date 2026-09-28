@@ -21,12 +21,12 @@ from typing import Any, Callable
 import faiss
 import numpy as np
 
-from app.http_json import default_json_request
+from app.core.http_json import default_json_request
 
 LOCAL_MODEL_DEFAULT = "all-MiniLM-L6-v2"
 OPENAI_EMBEDDING_DEFAULT = "text-embedding-3-small"
 
-CACHE_DIR = Path(__file__).parents[1] / "data" / "embeddings"
+CACHE_DIR = Path(__file__).parents[2] / "data" / "embeddings"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -217,7 +217,7 @@ def _ensure_index(signature: dict[str, str]) -> None:
         return
     if _load_cached(signature):
         return
-    from app.knowledge import load_documents
+    from app.agents.knowledge import load_documents
 
     docs = load_documents()
     documents = [

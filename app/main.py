@@ -1,9 +1,9 @@
 """FastAPI application wiring.
 
 This module deliberately contains only application construction and
-lifespan/middleware setup. Request handling lives in ``app.routers.*``,
-request/response models in ``app.schemas``, and shared business helpers in
-``app.support`` / ``app.auto_response``.
+lifespan/middleware setup. Request handling lives in ``app.api.routers.*``,
+request/response models in ``app.api.schemas``, and shared business helpers in
+``app.agents.support`` / ``app.agents.auto_response``.
 """
 
 import os
@@ -13,15 +13,15 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.database import init_db
-from app.observability import (
+from app.api.routers import admin, agent_assist, auth, system, tickets, webhooks
+from app.core.config_validation import validate_security_configuration
+from app.core.database import init_db
+from app.core.observability import (
     RequestContextMiddleware,
     get_app_logger,
     setup_logging,
     setup_tracing,
 )
-from app.routers import admin, agent_assist, auth, system, tickets, webhooks
-from app.security import validate_security_configuration
 
 setup_logging()
 

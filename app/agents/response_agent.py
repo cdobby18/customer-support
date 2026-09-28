@@ -18,10 +18,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.guardrails import Violation, validate_response
-from app.knowledge import KnowledgeMatch, search_knowledge
-from app.llm import LLMProvider, generate
-from app.prompts import get_template
+from app.agents.guardrails import Violation, validate_response
+from app.agents.knowledge import KnowledgeMatch, search_knowledge
+from app.agents.llm import LLMProvider, generate
+from app.agents.prompts import get_template
 
 NO_KB_FALLBACK = (
     "I don't have enough information to answer that yet, so a specialist will "

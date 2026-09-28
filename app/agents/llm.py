@@ -8,7 +8,7 @@ and token-based cost tracking. Provider selection is driven by the
 ``LLMNotConfigured`` so downstream agents can degrade gracefully.
 
 ``mock`` is a deterministic, credential-free provider for development and
-tests, mirroring the ``mock`` helpdesk provider in ``app/integrations.py``.
+tests, mirroring the ``mock`` helpdesk provider in ``app/agents/integrations.py``.
 Real providers use raw JSON over HTTPS (no SDK dependency) and accept an
 injected ``http_request`` transport for unit tests.
 """
@@ -24,9 +24,9 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
-from app.guardrails import redact
-from app.http_json import default_json_request
-from app.observability import get_app_logger
+from app.agents.guardrails import redact
+from app.core.http_json import default_json_request
+from app.core.observability import get_app_logger
 
 
 class LLMError(Exception):

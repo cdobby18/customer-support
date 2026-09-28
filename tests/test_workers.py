@@ -1,6 +1,6 @@
 import pytest
 
-from app import workers
+from app.core import workers
 
 
 def test_celery_configured_eager_by_default() -> None:

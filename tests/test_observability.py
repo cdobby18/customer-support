@@ -1,7 +1,7 @@
 import json
 import logging
 
-from app.observability import JsonFormatter, _request_id_ctx
+from app.core.observability import JsonFormatter, _request_id_ctx
 
 
 def test_request_id_default_is_none() -> None:

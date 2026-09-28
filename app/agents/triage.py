@@ -2,8 +2,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.llm import generate_json, LLMNotConfigured, LLMError
-from app.prompts import get_template
+from app.agents.llm import generate_json, LLMNotConfigured, LLMError
+from app.agents.prompts import get_template
 
 
 class TriageIntent(str, Enum):

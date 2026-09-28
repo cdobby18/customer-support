@@ -1,6 +1,6 @@
 import pytest
 
-from app.integrations import (
+from app.agents.integrations import (
     IntegrationError,
     MockHelpdeskProvider,
     ZendeskProvider,

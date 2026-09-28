@@ -10,15 +10,15 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from app.escalation import (
+from app.agents.escalation import (
     EscalationRiskLevel,
     route_for_risk,
     score_escalation,
     summarize_escalation,
 )
-from app.models import TicketRecord
-from app.schemas import add_audit_log
-from app.triage import TriageResult, classify_ticket
+from app.agents.triage import TriageResult, classify_ticket
+from app.api.schemas import add_audit_log
+from app.core.models import TicketRecord
 
 
 def triage(message: str) -> TriageResult:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from app.embeddings import semantic_search
+from app.agents.embeddings import semantic_search
 
 
 class KnowledgeDocument(BaseModel):
@@ -22,7 +22,7 @@ class KnowledgeMatch(BaseModel):
 
 
 def load_documents(directory: Path | None = None) -> list[KnowledgeDocument]:
-    document_directory = directory or Path(__file__).parents[1] / "data" / "docs"
+    document_directory = directory or Path(__file__).parents[2] / "data" / "docs"
     documents = []
     for path in sorted(document_directory.glob("*.md")):
         content = path.read_text(encoding="utf-8")

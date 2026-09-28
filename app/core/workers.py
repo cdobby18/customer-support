@@ -8,7 +8,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "1").lower() in {"1", "true", "yes"}
 
-celery_app = Celery("support", broker=REDIS_URL, backend=REDIS_URL, include=["app.workers"])
+celery_app = Celery("support", broker=REDIS_URL, backend=REDIS_URL, include=["app.core.workers"])
 
 celery_app.conf.update(
     task_always_eager=TASK_ALWAYS_EAGER,

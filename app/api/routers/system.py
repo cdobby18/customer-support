@@ -2,9 +2,9 @@
 
 from fastapi import APIRouter, Depends, Query
 
-from app.dependencies import get_current_user
-from app.knowledge import KnowledgeMatch, search_knowledge
-from app.models import UserRecord
+from app.agents.knowledge import KnowledgeMatch, search_knowledge
+from app.api.dependencies import get_current_user
+from app.core.models import UserRecord
 
 router = APIRouter()
 

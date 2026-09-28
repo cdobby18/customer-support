@@ -1,6 +1,6 @@
 import pytest
 
-from app.guardrails import (
+from app.agents.guardrails import (
     GuardrailType,
     Severity,
     evaluate,

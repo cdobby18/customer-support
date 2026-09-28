@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent_assist import AgentAssistResult, assist_ticket
-from app.database import get_db
-from app.dependencies import get_current_user
-from app.models import TicketCommentRecord, TicketRecord, UserRecord, UserRole
+from app.agents.agent_assist import AgentAssistResult, assist_ticket
+from app.api.dependencies import get_current_user
+from app.core.database import get_db
+from app.core.models import TicketCommentRecord, TicketRecord, UserRecord, UserRole
 
 router = APIRouter()
 

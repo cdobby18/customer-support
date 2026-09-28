@@ -6,14 +6,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.auth import create_access_token
-from app.database import Base, get_db
+from app.agents.knowledge import MIN_MATCH_SCORE, KnowledgeMatch, search_knowledge
+from app.agents.triage import TriageIntent, TriagePriority, TriageSentiment, classify_ticket
+from app.api.routers.webhooks import _rate_limiter_memory
+from app.core.config_validation import validate_security_configuration
+from app.core.database import Base, get_db
+from app.core.models import AuditLogRecord, UserRecord, UserRole
+from app.security.auth import create_access_token
 from app.main import app
-from app.models import AuditLogRecord, UserRecord, UserRole
-from app.knowledge import MIN_MATCH_SCORE, KnowledgeMatch, search_knowledge
-from app.routers.webhooks import _rate_limiter_memory
-from app.security import validate_security_configuration
-from app.triage import TriageIntent, TriagePriority, TriageSentiment, classify_ticket
 
 
 test_engine = create_engine(
@@ -988,7 +988,7 @@ def test_blocked_domain_ticket_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_ticket_creation_enqueues_notification_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     dispatched: list[tuple] = []
-    monkeypatch.setattr("app.routers.tickets.enqueue_notification", lambda *args: dispatched.append(args))
+    monkeypatch.setattr("app.api.routers.tickets.enqueue_notification", lambda *args: dispatched.append(args))
     customer_id, headers = make_customer()
 
     response = client.post(
@@ -1008,7 +1008,7 @@ def test_ticket_creation_enqueues_notification_dispatch(monkeypatch: pytest.Monk
 
 def test_channel_webhook_enqueues_notification_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     dispatched: list[tuple] = []
-    monkeypatch.setattr("app.routers.webhooks.enqueue_notification", lambda *args: dispatched.append(args))
+    monkeypatch.setattr("app.api.routers.webhooks.enqueue_notification", lambda *args: dispatched.append(args))
 
     response = client.post(
         "/webhooks/email",
@@ -1414,7 +1414,7 @@ def test_production_azure_openai_requires_credentials(
 
 
 def test_admin_llm_usage_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import llm as llm_module
+    from app.agents import llm as llm_module
 
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     llm_module.reset_llm_usage()
@@ -1512,7 +1512,7 @@ def test_response_draft_requires_llm_gateway(monkeypatch: pytest.MonkeyPatch) ->
 
 def _fixed_kb(monkeypatch: pytest.MonkeyPatch, matches: list[KnowledgeMatch]) -> None:
     monkeypatch.setattr(
-        "app.response_agent.search_knowledge",
+        "app.agents.response_agent.search_knowledge",
         lambda message, limit=5: matches,
     )
     monkeypatch.setenv("LLM_PROVIDER", "mock")
@@ -1723,7 +1723,7 @@ def test_purge_audit_logs_respects_retention_window(
     before = client.get("/admin/audit-logs", headers=admin_headers()).json()
     assert len(before) > 0
 
-    import app.routers.admin as admin_module
+    import app.api.routers.admin as admin_module
 
     monkeypatch.setattr(admin_module, "AUDIT_LOG_RETENTION_DAYS", 0)
     response = client.post("/admin/audit-logs/purge", headers=admin_headers())
@@ -1980,7 +1980,7 @@ def test_agent_assist_returns_summary_kb_and_similar_cases(
 ) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
-        "app.agent_assist.search_knowledge",
+        "app.agents.agent_assist.search_knowledge",
         lambda message, limit=5: [
             KnowledgeMatch(
                 document_id="password-reset",

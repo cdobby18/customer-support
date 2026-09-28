@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app import llm, prompts
+from app.agents import llm, prompts
 
 
 @pytest.fixture(autouse=True)

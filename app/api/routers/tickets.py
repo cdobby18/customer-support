@@ -7,25 +7,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.auto_response import (
+from app.agents.auto_response import (
     _maybe_auto_respond,
     run_auto_response,
 )
-from app.database import get_db
-from app.dependencies import get_current_user
-from app.guardrails import evaluate
-from app.intake import enrich_customer_context
-from app.integrations import sync_ticket_outbound
-from app.llm import LLMConfigError, LLMError
-from app.models import (
-    FeedbackRecord,
-    TicketCommentRecord,
-    TicketRecord,
-    UserRecord,
-    UserRole,
+from app.agents.guardrails import evaluate
+from app.agents.intake import enrich_customer_context
+from app.agents.integrations import sync_ticket_outbound
+from app.agents.llm import LLMConfigError, LLMError
+from app.agents.response_agent import draft_reply
+from app.agents.support import (
+    _integration_ticket_payload,
+    _record_integration_sync,
+    build_escalation_intelligence,
+    sla_deadline,
+    triage,
 )
-from app.response_agent import draft_reply
-from app.schemas import (
+from app.api.dependencies import get_current_user
+from app.api.schemas import (
     AutoRespondResponse,
     CommentCreate,
     DraftDecisionRequest,
@@ -45,14 +44,15 @@ from app.schemas import (
     to_feedback,
     to_ticket,
 )
-from app.support import (
-    _integration_ticket_payload,
-    _record_integration_sync,
-    build_escalation_intelligence,
-    sla_deadline,
-    triage,
+from app.core.database import get_db
+from app.core.models import (
+    FeedbackRecord,
+    TicketCommentRecord,
+    TicketRecord,
+    UserRecord,
+    UserRole,
 )
-from app.workers import enqueue_notification
+from app.core.workers import enqueue_notification
 
 
 def ensure_ticket_access(ticket: TicketRecord, user: UserRecord) -> None:
