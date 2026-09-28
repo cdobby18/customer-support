@@ -207,7 +207,7 @@ def test_generate_json_returns_parsed_object(monkeypatch: pytest.MonkeyPatch) ->
     assert parsed["provider"] == "mock"
 
 
-def test_generate_json_raises_on_invalid_object(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_json_raises_on_invalid_object() -> None:
     class BadProvider(llm.MockLLMProvider):
         def complete(self, messages, **kwargs):
             return llm.LLMResult(text="not json", model="bad", provider="mock")

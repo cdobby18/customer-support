@@ -21,11 +21,11 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Callable
-from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, Field
 
 from app.guardrails import redact
+from app.http_json import default_json_request
 from app.observability import get_app_logger
 
 
@@ -104,23 +104,9 @@ class LLMProvider(ABC):
         """Run a chat completion and return the annotated result."""
 
 
-def _default_http_request(
-    method: str,
-    url: str,
-    headers: dict[str, str],
-    payload: dict[str, Any] | None,
-) -> tuple[int, dict[str, Any]]:
-    body = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = Request(url, data=body, headers=headers, method=method)
-    with urlopen(request, timeout=30) as response:
-        raw = response.read()
-        parsed = json.loads(raw.decode("utf-8")) if raw else {}
-        return response.status, parsed
-
-
 class _HttpProvider(LLMProvider):
     def __init__(self, http_request: Callable[..., Any] | None = None) -> None:
-        self._http_request = http_request or _default_http_request
+        self._http_request = http_request or default_json_request
 
     def _respond(
         self,

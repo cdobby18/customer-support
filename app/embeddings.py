@@ -12,16 +12,16 @@ the active signature changes (for example switching from a 384-dim local
 model to the 1536-dim OpenAI model) the index is rebuilt automatically.
 """
 
-import json
 import os
 import pickle
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable
-from urllib.request import Request, urlopen
 
 import faiss
 import numpy as np
+
+from app.http_json import default_json_request
 
 LOCAL_MODEL_DEFAULT = "all-MiniLM-L6-v2"
 OPENAI_EMBEDDING_DEFAULT = "text-embedding-3-small"
@@ -60,20 +60,6 @@ def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
     return vectors / norms
 
 
-def _default_http_request(
-    method: str,
-    url: str,
-    headers: dict[str, str],
-    payload: dict[str, Any] | None,
-) -> tuple[int, dict[str, Any]]:
-    body = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = Request(url, data=body, headers=headers, method=method)
-    with urlopen(request, timeout=30) as response:
-        raw = response.read()
-        parsed = json.loads(raw.decode("utf-8")) if raw else {}
-        return response.status, parsed
-
-
 _local_models: dict[str, Any] = {}
 
 
@@ -109,7 +95,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     name = "openai"
 
     def __init__(self, http_request: Callable[..., Any] | None = None) -> None:
-        self._http_request = http_request or _default_http_request
+        self._http_request = http_request or default_json_request
 
     @property
     def model(self) -> str:

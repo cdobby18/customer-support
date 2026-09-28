@@ -40,7 +40,18 @@ class ChannelAdapter:
         raise NotImplementedError
 
     def extract_attachments(self, raw_payload: dict[str, Any]) -> list[Attachment]:
-        return []
+        attachments = []
+        for att in raw_payload.get("attachments", []):
+            attachments.append(
+                Attachment(
+                    id=att.get("id", ""),
+                    filename=att.get("filename", "unknown"),
+                    content_type=att.get("content_type"),
+                    size=att.get("size"),
+                    url=att.get("url"),
+                )
+            )
+        return attachments
 
     def extract_thread_id(self, raw_payload: dict[str, Any]) -> str | None:
         return None
@@ -53,7 +64,7 @@ class EmailIntakeAdapter(ChannelAdapter):
     channel_name = "email"
 
     def normalize(self, raw_payload: dict[str, Any]) -> NormalizedMessage:
-        # Legacy format (backward compatible with ChannelMessage)
+        # Legacy payload shape (flat customer_id/message, no provider fields)
         if "customer_id" in raw_payload and "message" in raw_payload:
             customer_id = raw_payload.get("customer_id") or "unknown"
             message = raw_payload.get("message", "")
@@ -83,20 +94,6 @@ class EmailIntakeAdapter(ChannelAdapter):
     def extract_thread_id(self, raw_payload: dict[str, Any]) -> str | None:
         return raw_payload.get("in_reply_to") or raw_payload.get("references")
 
-    def extract_attachments(self, raw_payload: dict[str, Any]) -> list[Attachment]:
-        attachments = []
-        for att in raw_payload.get("attachments", []):
-            attachments.append(
-                Attachment(
-                    id=att.get("id", ""),
-                    filename=att.get("filename", "unknown"),
-                    content_type=att.get("content_type"),
-                    size=att.get("size"),
-                    url=att.get("url"),
-                )
-            )
-        return attachments
-
     def extract_channel_metadata(self, raw_payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "subject": raw_payload.get("subject"),
@@ -111,7 +108,7 @@ class SlackIntakeAdapter(ChannelAdapter):
     channel_name = "slack"
 
     def normalize(self, raw_payload: dict[str, Any]) -> NormalizedMessage:
-        # Legacy format (backward compatible with ChannelMessage)
+        # Legacy payload shape (flat customer_id/message, no provider fields)
         if "customer_id" in raw_payload and "message" in raw_payload:
             customer_id = raw_payload.get("customer_id") or "unknown"
             message = raw_payload.get("message", "")
@@ -173,7 +170,7 @@ class WhatsAppIntakeAdapter(ChannelAdapter):
     channel_name = "whatsapp"
 
     def normalize(self, raw_payload: dict[str, Any]) -> NormalizedMessage:
-        # Legacy format (backward compatible with ChannelMessage)
+        # Legacy payload shape (flat customer_id/message, no provider fields)
         if "customer_id" in raw_payload and "message" in raw_payload:
             customer_id = raw_payload.get("customer_id") or "unknown"
             message = raw_payload.get("message", "")
@@ -256,7 +253,7 @@ class ChatIntakeAdapter(ChannelAdapter):
     channel_name = "chat"
 
     def normalize(self, raw_payload: dict[str, Any]) -> NormalizedMessage:
-        # Legacy format (backward compatible with ChannelMessage)
+        # Legacy payload shape (flat customer_id/message, no provider fields)
         if "customer_id" in raw_payload and "message" in raw_payload:
             customer_id = raw_payload.get("customer_id") or "unknown"
             message = raw_payload.get("message", "")
@@ -283,20 +280,6 @@ class ChatIntakeAdapter(ChannelAdapter):
             channel_metadata=channel_metadata,
         )
 
-    def extract_attachments(self, raw_payload: dict[str, Any]) -> list[Attachment]:
-        attachments = []
-        for att in raw_payload.get("attachments", []):
-            attachments.append(
-                Attachment(
-                    id=att.get("id", ""),
-                    filename=att.get("filename", "unknown"),
-                    content_type=att.get("content_type"),
-                    size=att.get("size"),
-                    url=att.get("url"),
-                )
-            )
-        return attachments
-
     def extract_channel_metadata(self, raw_payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "session_id": raw_payload.get("session_id"),
@@ -311,7 +294,7 @@ class CRMIntakeAdapter(ChannelAdapter):
     channel_name = "crm"
 
     def normalize(self, raw_payload: dict[str, Any]) -> NormalizedMessage:
-        # Legacy format (backward compatible with ChannelMessage)
+        # Legacy payload shape (flat customer_id/message, no provider fields)
         if "customer_id" in raw_payload and "message" in raw_payload:
             customer_id = raw_payload.get("customer_id") or "unknown"
             message = raw_payload.get("message", "")
@@ -337,20 +320,6 @@ class CRMIntakeAdapter(ChannelAdapter):
             attachments=attachments,
             channel_metadata=channel_metadata,
         )
-
-    def extract_attachments(self, raw_payload: dict[str, Any]) -> list[Attachment]:
-        attachments = []
-        for att in raw_payload.get("attachments", []):
-            attachments.append(
-                Attachment(
-                    id=att.get("id", ""),
-                    filename=att.get("filename", "unknown"),
-                    content_type=att.get("content_type"),
-                    size=att.get("size"),
-                    url=att.get("url"),
-                )
-            )
-        return attachments
 
     def extract_channel_metadata(self, raw_payload: dict[str, Any]) -> dict[str, Any]:
         return {

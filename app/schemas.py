@@ -42,12 +42,6 @@ class TicketCreate(BaseModel):
     channel: str = Field(default="web", min_length=1)
 
 
-class ChannelMessage(BaseModel):
-    customer_id: str = Field(min_length=1)
-    message: str = Field(min_length=1)
-    external_id: str | None = Field(default=None, min_length=1)
-
-
 class TicketUpdate(BaseModel):
     status: TicketStatus | None = None
     assignee_id: str | None = Field(default=None, min_length=1)

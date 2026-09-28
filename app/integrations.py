@@ -225,7 +225,6 @@ def _integration_remote_id(ticket: Any) -> str | None:
 
 
 def sync_ticket_outbound(
-    db: Session,
     ticket: Any,
     event: str,
     *,

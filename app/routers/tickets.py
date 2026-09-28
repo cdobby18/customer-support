@@ -183,7 +183,7 @@ def create_ticket(
         current_user.id,
         "ticket.created",
         record,
-        sync_ticket_outbound(db, record, "ticket.created", ticket_payload=_integration_ticket_payload(record)),
+        sync_ticket_outbound(record, "ticket.created", ticket_payload=_integration_ticket_payload(record)),
     )
     return to_ticket(record)
 
@@ -302,8 +302,8 @@ def update_ticket(
             "ticket.updated",
             record,
             sync_ticket_outbound(
-                db, record, "ticket.updated", ticket_payload=_integration_ticket_payload(record)
-            ),
+                    record, "ticket.updated", ticket_payload=_integration_ticket_payload(record)
+                ),
         )
     return to_ticket(record)
 
@@ -387,9 +387,8 @@ def add_comment(
             "ticket.comment_added",
             ticket,
             sync_ticket_outbound(
-                db,
-                ticket,
-                "ticket.comment_added",
+                    ticket,
+                    "ticket.comment_added",
                 comment_payload={
                     "id": record.id,
                     "body": record.body,
@@ -586,9 +585,8 @@ def decide_draft(
             "response.draft_approved",
             record,
             sync_ticket_outbound(
-                db,
-                record,
-                "response.draft_approved",
+                    record,
+                    "response.draft_approved",
                 comment_payload={
                     "id": comment.id,
                     "body": comment.body,

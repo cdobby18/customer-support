@@ -396,6 +396,6 @@ async def receive_channel_message(
         None,
         "ticket.received",
         record,
-        sync_ticket_outbound(db, record, "ticket.received", ticket_payload=_integration_ticket_payload(record)),
+        sync_ticket_outbound(record, "ticket.received", ticket_payload=_integration_ticket_payload(record)),
     )
     return to_ticket(record)
