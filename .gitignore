@@ -5,31 +5,25 @@ support.db
 frontend/node_modules/
 frontend/dist/
 frontend/playwright-report/
+frontend/test-results/
 
 .vscode/
-tests/
 
-# FAISS
-scripts/
+# FAISS index + embedding cache are generated from data/docs
+data/embeddings/
 
 #SERVER LOGS
 server_err.log
 server_out.log
 server.log
 
-# ENV
-.env.example
+# ENV — .env holds real secrets and is ignored; .env.example is the
+# committed reference of supported variables and must be tracked.
+.env
 
 # MD FILES
 md-files/
-data/
 
-# CONTAIN
-alembic.ini
-docker-compose.yml
-
-# PY FILES
-check_db.py 
+# Scratch scripts kept out of the repo
+check_db.py
 test_semantic.py
-
-migrations/
