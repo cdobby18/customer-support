@@ -8,9 +8,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.auth import create_access_token
 from app.database import Base, get_db
-from app.main import app, validate_security_configuration, _rate_limiter_memory
+from app.main import app
 from app.models import AuditLogRecord, UserRecord, UserRole
 from app.knowledge import MIN_MATCH_SCORE, KnowledgeMatch, search_knowledge
+from app.routers.webhooks import _rate_limiter_memory
+from app.security import validate_security_configuration
 from app.triage import TriageIntent, TriagePriority, TriageSentiment, classify_ticket
 
 
@@ -986,7 +988,7 @@ def test_blocked_domain_ticket_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_ticket_creation_enqueues_notification_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     dispatched: list[tuple] = []
-    monkeypatch.setattr("app.main.enqueue_notification", lambda *args: dispatched.append(args))
+    monkeypatch.setattr("app.routers.tickets.enqueue_notification", lambda *args: dispatched.append(args))
     customer_id, headers = make_customer()
 
     response = client.post(
@@ -1006,7 +1008,7 @@ def test_ticket_creation_enqueues_notification_dispatch(monkeypatch: pytest.Monk
 
 def test_channel_webhook_enqueues_notification_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     dispatched: list[tuple] = []
-    monkeypatch.setattr("app.main.enqueue_notification", lambda *args: dispatched.append(args))
+    monkeypatch.setattr("app.routers.webhooks.enqueue_notification", lambda *args: dispatched.append(args))
 
     response = client.post(
         "/webhooks/email",
@@ -1721,9 +1723,9 @@ def test_purge_audit_logs_respects_retention_window(
     before = client.get("/admin/audit-logs", headers=admin_headers()).json()
     assert len(before) > 0
 
-    import app.main as main_module
+    import app.routers.admin as admin_module
 
-    monkeypatch.setattr(main_module, "AUDIT_LOG_RETENTION_DAYS", 0)
+    monkeypatch.setattr(admin_module, "AUDIT_LOG_RETENTION_DAYS", 0)
     response = client.post("/admin/audit-logs/purge", headers=admin_headers())
 
     assert response.status_code == 200
