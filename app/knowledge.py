@@ -55,12 +55,13 @@ def search_knowledge(query: str, limit: int = 5) -> list[KnowledgeMatch]:
     return matches
 
 
-def _terms(text: str) -> set[str]:
+def tokenize(text: str) -> set[str]:
+    """Lowercase word set, dropping 1-2 character noise tokens."""
     return {term for term in re.findall(r"[a-z0-9]+", text.lower()) if len(term) > 2}
 
 
 def _excerpt(content: str, matching_terms: set[str]) -> str:
     for paragraph in content.split("\n\n"):
-        if matching_terms & _terms(paragraph):
+        if matching_terms & tokenize(paragraph):
             return " ".join(paragraph.split())[:360]
     return " ".join(content.split())[:360]

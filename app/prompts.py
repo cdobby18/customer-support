@@ -118,6 +118,23 @@ AGENT_ASSIST_TEMPLATE = (
     "Ticket history:\n{history}"
 )
 
+AGENT_ASSIST_SUGGEST_JSON_TEMPLATE = (
+    "You are the Agent Assist Agent helping a live support agent who is "
+    "working this ticket right now. The ticket history is provided in the "
+    "system message. Return a single JSON object with exactly these keys:\n"
+    "- summary: a paragraph describing the core issue, what the customer wants, "
+    "and where the conversation currently stands\n"
+    "- suggested_replies: an array of at most 3 short customer-facing replies "
+    "the agent could send, written in the brand voice and grounded in the "
+    "history alone\n"
+    "- recommended_team: the team or specialist best suited to handle this, or "
+    "an empty string if the general team should keep it\n\n"
+    "Never invent facts, policies, or commitments that are not in the history. "
+    "Do not include HTML, markdown links, or placeholder text.\n\n"
+    "Ticket history:\n{history}\n\n"
+    "Respond with JSON only."
+)
+
 
 TEMPLATES: dict[str, PromptTemplate] = {
     template.name: template
@@ -151,6 +168,12 @@ TEMPLATES: dict[str, PromptTemplate] = {
             1,
             AGENT_ASSIST_TEMPLATE,
             description="Ticket summary + suggested replies (Task 7).",
+        ),
+        PromptTemplate(
+            "agent_assist.suggest_json",
+            1,
+            AGENT_ASSIST_SUGGEST_JSON_TEMPLATE,
+            description="Structured agent assist: summary + suggested replies + team (Task 7).",
         ),
     )
 }
