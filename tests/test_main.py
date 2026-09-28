@@ -10,7 +10,7 @@ from app.auth import create_access_token
 from app.database import Base, get_db
 from app.main import app, validate_security_configuration, _rate_limiter_memory
 from app.models import AuditLogRecord, UserRecord, UserRole
-from app.knowledge import KnowledgeMatch, search_knowledge
+from app.knowledge import MIN_MATCH_SCORE, KnowledgeMatch, search_knowledge
 from app.triage import TriageIntent, TriagePriority, TriageSentiment, classify_ticket
 
 
@@ -539,6 +539,17 @@ def test_knowledge_search_returns_grounded_billing_excerpt() -> None:
     assert matches
     assert matches[0].document_id == "billing-and-refunds"
     assert "human approval" in matches[0].excerpt.lower()
+
+
+def test_knowledge_search_drops_matches_below_relevance_floor() -> None:
+    assert search_knowledge("how do I bake a cake") == []
+
+
+def test_knowledge_search_floor_is_overridable() -> None:
+    loose = search_knowledge("shipping", min_score=0.0)
+
+    assert loose
+    assert search_knowledge("shipping", min_score=MIN_MATCH_SCORE) == []
 
 
 def test_authenticated_knowledge_search_endpoint_returns_sources() -> None:

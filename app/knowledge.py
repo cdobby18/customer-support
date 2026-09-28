@@ -38,10 +38,17 @@ def load_documents(directory: Path | None = None) -> list[KnowledgeDocument]:
     return documents
 
 
-def search_knowledge(query: str, limit: int = 5) -> list[KnowledgeMatch]:
+MIN_MATCH_SCORE = 0.25
+
+
+def search_knowledge(
+    query: str, limit: int = 5, min_score: float = MIN_MATCH_SCORE
+) -> list[KnowledgeMatch]:
     results = semantic_search(query, limit=limit)
     matches = []
     for r in results:
+        if r["score"] < min_score:
+            continue
         excerpt = _excerpt(r["content"], set())
         matches.append(
             KnowledgeMatch(
