@@ -780,6 +780,106 @@ function StarRating({ value, onSelect }) {
   );
 }
 
+function AgentAssistPanel({ session, ticketId }) {
+  const [assist, setAssist] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function loadAssist() {
+    if (!ticketId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest(`/tickets/${ticketId}/agent-assist`, {}, session.access_token);
+      setAssist(result);
+    } catch (requestError) {
+      setError(requestError.message);
+      setAssist(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="ai-draft-panel">
+      <div className="team-heading">
+        <div>
+          <p className="eyebrow">Agent Assist</p>
+          <h2><LifeBuoy size={19} /> ASSIST</h2>
+          <p className="muted">Summary, suggested replies, similar past cases, and relevant KB articles for the selected ticket.</p>
+        </div>
+        <span>{loading ? "loading..." : assist ? `v${assist.template_version}` : ""}</span>
+      </div>
+      {error && <div className="team-notice error-text">{error}</div>}
+      <div className="draft-actions">
+        <button className="primary-button draft-generate" onClick={loadAssist} disabled={loading || !ticketId}>
+          <LifeBuoy size={16} /> {loading ? "Loading assist..." : "Load assist for selected ticket"}
+        </button>
+      </div>
+      {!ticketId && <div className="empty-state"><LifeBuoy size={28} /><strong>No ticket selected</strong><span>Pick a ticket from the queue first.</span></div>}
+      {assist && (
+        <div className="draft-result">
+          <div className="draft-card">
+            <div className="draft-card-top">
+              <h4><Sparkles size={15} /> Summary</h4>
+              {assist.provider ? <span className="draft-badge ready">{assist.provider}{assist.model ? ` · ${assist.model}` : ""}</span> : <span className="draft-badge review">No LLM provider</span>}
+            </div>
+            <p className="draft-text">{assist.summary}</p>
+            {assist.recommended_team && <p className="muted">Recommended team: <strong>{assist.recommended_team.replaceAll("_", " ")}</strong></p>}
+          </div>
+
+          <div className="draft-card">
+            <div className="draft-card-top"><h4><MessageSquare size={15} /> Suggested replies</h4></div>
+            {assist.suggested_replies.length ? assist.suggested_replies.map((reply, index) => (
+              <div key={index} className="citation-row" style={{ display: "block" }}>
+                <p className="draft-text" style={{ margin: 0 }}>{reply.text}</p>
+                {reply.violations.length ? (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                    {reply.violations.map((violation, vIndex) => (
+                      <span key={vIndex} className="guardrail-badge"><ShieldAlert size={12} /> {violation.category}</span>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            )) : (
+              <p className="muted">No replies suggested. Set LLM_PROVIDER to enable AI suggestions; the summary above still works without it.</p>
+            )}
+          </div>
+
+          <div className="draft-card">
+            <div className="draft-card-top"><h4><Activity size={15} /> Similar cases</h4></div>
+            {assist.similar_cases.length ? assist.similar_cases.map((similar) => (
+              <article className="help-result" key={similar.ticket_id}>
+                <div className="help-result-title"><Activity size={15} /><strong>{similar.intent.replaceAll("_", " ")}</strong><span className="citation-score">{Math.round(similar.score * 100)}% match</span></div>
+                <p>{similar.summary}</p>
+                <small>{similar.ticket_id.slice(0, 8)}{similar.resolved_at ? ` · resolved ${new Date(similar.resolved_at).toLocaleDateString()}` : ""}</small>
+              </article>
+            )) : (
+              <p className="muted">No similar resolved cases yet.</p>
+            )}
+          </div>
+
+          <div className="draft-card">
+            <div className="draft-card-top"><h4><BookOpen size={15} /> Knowledge base</h4></div>
+            {assist.knowledge.length ? assist.knowledge.map((article) => (
+              <div key={article.document_id} className="citation-row" style={{ display: "block" }}>
+                <div className="citation-row" style={{ border: 0, background: "none", padding: 0, marginBottom: 4 }}>
+                  <strong>{article.title}</strong>
+                  <span className="citation-score">{Math.round(article.score * 100)}% match</span>
+                </div>
+                <p style={{ margin: "0 0 4px" }}>{article.excerpt}</p>
+                <small>{article.source}</small>
+              </div>
+            )) : (
+              <p className="muted">No knowledge base articles above the relevance threshold.</p>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function CustomerHelpCenter({ session, onOpenTicket }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
@@ -983,6 +1083,7 @@ return (
           <button className={`nav-item ${activeView === "inbox" ? "active" : ""}`} onClick={() => setActiveView("inbox")}><Inbox size={17} /> Inbox <span>{tickets.filter(t => t.status !== "closed").length}</span></button>
           {isStaff && <button className={`nav-item ${activeView === "escalations" ? "active" : ""}`} onClick={() => setActiveView("escalations")}><AlertTriangle size={17} /> Escalations <span>{tickets.filter(t => t.escalation_status === "pending").length}</span></button>}
           {isStaff && <button className={`nav-item ${activeView === "ai-draft" ? "active" : ""}`} onClick={() => setActiveView("ai-draft")}><Sparkles size={17} /> RelayAI</button>}
+          {isStaff && <button className={`nav-item ${activeView === "agent-assist" ? "active" : ""}`} onClick={() => setActiveView("agent-assist")}><LifeBuoy size={17} /> Assist</button>}
           <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => setActiveView("conversations")}><MessageSquare size={17} /> Conversations <span>{tickets.filter(t => ["resolved", "closed"].includes(t.status)).length}</span></button>
           <button className={`nav-item ${activeView === "help" ? "active" : ""}`} onClick={() => setActiveView("help")}><BookOpen size={17} /> Help center</button>
           {session.user.role === "admin" && <button className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => setActiveView("analytics")}><BarChart3 size={17} /> Analytics</button>}
@@ -990,7 +1091,7 @@ return (
         <div className="sidebar-bottom"><div className="user-chip"><div className="avatar"><UserRound size={16} /></div><div><strong>{session.user.email.split("@")[0]}</strong><small>{session.user.role}</small></div></div><button className="logout-button" onClick={onLogout} title="Sign out"><LogOut size={17} /></button></div>
       </aside>
       <main className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "ESCALATION QUEUE" : activeView === "conversations" ? "CONVERSATION HISTORY" : activeView === "analytics" ? "ANALYTICS" : activeView === "ai-draft" ? "AI RESPONSE" : activeView === "help" ? "HELP CENTER" : isStaff ? "SUPPORT QUEUE" : "Your conversations"}</h1></div><div className="topbar-actions"><span className="live-status"><span /> System healthy</span><button className="icon-button" onClick={loadTickets} title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "ESCALATION QUEUE" : activeView === "conversations" ? "CONVERSATION HISTORY" : activeView === "analytics" ? "ANALYTICS" : activeView === "ai-draft" ? "AI RESPONSE" : activeView === "agent-assist" ? "AGENT ASSIST" : activeView === "help" ? "HELP CENTER" : isStaff ? "SUPPORT QUEUE" : "Your conversations"}</h1></div><div className="topbar-actions"><span className="live-status"><span /> System healthy</span><button className="icon-button" onClick={loadTickets} title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
         <section className="stats-row"><div><span>{isStaff ? "Open tickets" : "Open"}</span><strong>{tickets.filter((ticket) => ticket.status === "open").length}</strong></div><div><span>{isStaff ? "Needs attention" : "In review"}</span><strong>{tickets.filter((ticket) => ticket.requires_human_review).length}</strong></div><div><span>In progress</span><strong>{tickets.filter((ticket) => ticket.status === "in_progress").length}</strong></div></section>
         {notice && <div className="notice"><Check size={15} /> {notice}<button onClick={() => setNotice("")}>Dismiss</button></div>}
         {session.user.role === "admin" && <><AdminTeamPanel session={session} /><AuditActivity session={session} /></>}
@@ -1000,6 +1101,8 @@ return (
           <EscalationReviewPanel session={session} />
         ) : activeView === "ai-draft" && isStaff ? (
           <AiDraftPanel session={session} />
+        ) : activeView === "agent-assist" && isStaff ? (
+          <AgentAssistPanel session={session} ticketId={selectedId} />
         ) : activeView === "help" ? (
           <CustomerHelpCenter session={session} onOpenTicket={() => setActiveView("inbox")} />
         ) : (
