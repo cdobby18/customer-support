@@ -209,6 +209,19 @@ def phase_app_level() -> str:
     return ticket_id
 
 
+def _task_result(async_result):
+    """Return (ready, result) reading `.result` the way Celery means it.
+
+    On a Celery AsyncResult, `.result` is a property, not a method. The first
+    attempt called it as one; the notify task returns a dict, so it exploded
+    with `TypeError: 'dict' object is not callable` exactly when everything
+    worked — not a tolerable failure mode for a checker.
+    """
+    if not async_result.ready():
+        return False, None
+    return True, async_result.result
+
+
 def phase_task_level() -> None:
     from app.core.workers import celery_app, dispatch_notification
 
@@ -220,12 +233,11 @@ def phase_task_level() -> None:
         if async_result.ready():
             break
         time.sleep(0.5)
-    if not async_result.ready():
+    ready, result = _task_result(async_result)
+    if not ready:
         fail("direct apply_async task never completed", f"state={async_result.state}")
-    if async_result.result() is None:
+    if result is None:
         fail("task returned None; the broker ran it but it did no work")
-
-    result = async_result.result()
     if result.get("status") != "sent":
         fail(f"task result was {result}, expected status 'sent'")
 

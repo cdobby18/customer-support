@@ -92,3 +92,35 @@ def test_configure_as_producer_forces_non_eager(monkeypatch: pytest.MonkeyPatch)
     driver.configure_as_producer()
 
     assert os.environ["CELERY_TASK_ALWAYS_EAGER"] == "0"
+
+
+def test_task_result_reads_the_property_not_a_method() -> None:
+    """`.result` on an AsyncResult is a property; the notify task returns a
+    dict, so the original `async_result.result()` code raised TypeError exactly
+    when everything worked."""
+
+    class _Result:
+        def ready(self) -> bool:
+            return True
+
+        @property
+        def result(self) -> dict:
+            return {"status": "sent"}
+
+    ready, result = driver._task_result(_Result())
+
+    assert ready is True
+    assert result["status"] == "sent"
+
+
+def test_task_result_reports_not_ready() -> None:
+    class _NotReady:
+        def ready(self) -> bool:
+            return False
+
+        result = None
+
+    ready, result = driver._task_result(_NotReady())
+
+    assert ready is False
+    assert result is None
