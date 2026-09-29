@@ -103,13 +103,31 @@ jobs:
           fi
 
       - name: Migrations apply to an empty database
+        # A named volume, not two containers each with their own /tmp: the
+        # ephemeral filesystem is discarded with the container, so the original
+        # version of this step checked an empty database twice and could not
+        # have failed. A volume is also what a real deploy has.
         run: |
+          docker volume create support-migrate
           docker run --rm \
-            -e DATABASE_URL=sqlite:////tmp/migrate.db \
+            --volume support-migrate:/state \
+            -e DATABASE_URL=sqlite:////state/migrate.db \
             support-api:${{ github.sha }} alembic upgrade head
-          docker run --rm \
-            -e DATABASE_URL=sqlite:////tmp/migrate.db \
-            support-api:${{ github.sha }} alembic current
+          current="$(docker run --rm \
+            --volume support-migrate:/state \
+            -e DATABASE_URL=sqlite:////state/migrate.db \
+            support-api:${{ github.sha }} alembic current 2>&1)"
+          echo "$current"
+          docker volume rm support-migrate
+          # `alembic current` exits 0 and prints no revision at all when the
+          # database has never been migrated, so the exit code proves nothing.
+          # "(head)" is the part that distinguishes an upgraded database from an
+          # empty one, and it tracks new migrations automatically instead of
+          # hardcoding a revision id that would rot on the next one.
+          if ! grep -q "(head)" <<<"$current"; then
+            echo "::error::database is not at the alembic head"
+            exit 1
+          fi
 
       - name: API serves /health
         run: |

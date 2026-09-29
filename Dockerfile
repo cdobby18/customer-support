@@ -45,6 +45,7 @@ RUN pip install -r requirements.txt
 # use.
 COPY app/ ./app/
 COPY migrations/ ./migrations/
+COPY docker/healthcheck.py ./docker/healthcheck.py
 COPY alembic.ini ./
 COPY data/docs/ ./data/docs/
 
@@ -56,19 +57,11 @@ USER appuser
 
 EXPOSE 8000
 
-# Uses the interpreter already in the image rather than installing curl for one
-# health probe. The connection failure is caught rather than left to raise: a
-# refused connection is the expected unhealthy case, and letting it propagate
-# would print a traceback into the container log on every failed probe.
-# /health is a static route - it answers without touching the database, so a
-# failing probe means the process is unhealthy, not that PostgreSQL is briefly
-# unreachable.
+# Uses the image's own interpreter rather than installing curl for one probe.
+# The probe lives in a file, not an inline string: the Dockerfile parser reads
+# line by line, so a quoted multi-line CMD does not survive the build.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD ["python", "-c", "import sys,urllib.request
-try:
-    sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)
-except Exception:
-    sys.exit(1)"]
+    CMD ["python", "docker/healthcheck.py"]
 
 # --pool=solo, not the default prefork: the worker imports the same modules as
 # the API, so forking would copy a multi-gigabyte torch process per child. This
