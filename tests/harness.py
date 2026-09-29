@@ -5,8 +5,16 @@ the API through a TestClient has to use the *same* database. Two modules each
 building their own in-memory engine means whichever one was imported last wins,
 and the other module's tests silently run against an empty database. Modules
 import `test_engine` and `client` from here instead.
+
+By default the database is in-memory SQLite. Set `TEST_DATABASE_URL` to point
+the whole suite at a real PostgreSQL instead, which is how CI catches the
+dialect differences SQLite cannot show: foreign keys that are actually enforced,
+case-sensitive LIKE, and `TIMESTAMP WITH TIME ZONE` round-tripping a real
+timezone. The engine is shared (a static in-memory SQLite would not be
+shareable), so `reset_schema()` is the only isolation mechanism either way.
 """
 
+import os
 from collections.abc import Generator
 from datetime import datetime, timezone
 
@@ -23,11 +31,20 @@ ADMIN_ID = "00000000-0000-0000-0000-000000000001"
 ADMIN_EMAIL = "admin@example.com"
 ADMIN_PASSWORD = "correct horse battery"
 
-test_engine = create_engine(
-    "sqlite://",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+
+if TEST_DATABASE_URL:
+    # A real server: pool_pre_ping because a long test run can outlive the
+    # connection, and the schema is created up front because Postgres, unlike
+    # an in-memory SQLite, does not conjure a database on connect.
+    test_engine = create_engine(TEST_DATABASE_URL, pool_pre_ping=True)
+    Base.metadata.create_all(bind=test_engine)
+else:
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 
 
 def seed_admin() -> None:

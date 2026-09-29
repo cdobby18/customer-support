@@ -276,3 +276,166 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report
           retention-days: 7
+
+  postgres:
+    name: PostgreSQL + real Celery worker
+    runs-on: ubuntu-latest
+
+    # SQLite cannot show what is different about a real database, and an eager
+    # task queue cannot show that a task runs at all. Everything below exists to
+    # put the two real dependencies underneath the app and see what breaks.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: support
+          POSTGRES_PASSWORD: support
+          POSTGRES_DB: support_suite
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready -U support -d support_suite
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_suite
+      REDIS_URL: redis://127.0.0.1:6379/0
+      APP_ENV: development
+      TRUSTED_HOSTS: 127.0.0.1,localhost
+      LLM_PROVIDER: mock
+      SUPPORT_TOOL_PROVIDER: mock
+      JWT_SECRET: ci-only-not-a-real-secret
+      CHANNEL_WEBHOOK_SECRET: ci-only-not-a-real-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run the test suite against PostgreSQL
+        # The same 295 tests, on the database that will actually be deployed
+        # against. SQLite is permissive in ways that hide real bugs: it does not
+        # enforce foreign keys, and it stores TIMESTAMP WITHOUT TIME ZONE, so a
+        # timezone bug cannot survive to production.
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_suite
+        run: |
+          python -m pytest -q
+
+      - name: Create the deployment database
+        # A second database, because the suite drops and recreates every table
+        # between tests. The end-to-end run below has to use a database that
+        # Alembic built, not one the test harness left behind.
+        run: |
+          python - <<'PY'
+          import psycopg
+          with psycopg.connect(
+              "postgresql://support:support@127.0.0.1:5432/postgres", autocommit=True
+          ) as connection:
+              connection.execute("CREATE DATABASE support_deploy")
+          PY
+
+      - name: Apply migrations to PostgreSQL
+        env:
+          DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_deploy
+        run: |
+          python -m alembic upgrade head
+          # A Postgres DDL failure that SQLite would have swallowed is the
+          # whole point of this step, so assert the schema rather than trusting
+          # the exit code alone.
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+          engine = create_engine(os.environ["DATABASE_URL"])
+          tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
+          required = {
+              "users", "tickets", "ticket_comments", "audit_logs",
+              "feedback", "revoked_tokens",
+          }
+          missing = required - tables
+          if missing:
+              raise SystemExit(f"migrations did not create: {sorted(missing)}")
+          print(f"alembic created {len(tables)} tables: {sorted(tables)}")
+          PY
+
+      - name: Start the notification receiver
+        run: |
+          nohup python scripts/notify_receiver.py 8099 > /tmp/receiver.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8099/health > /dev/null; then
+              echo "receiver up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/receiver.log
+          exit 1
+
+      - name: Start a real Celery worker
+        # --loglevel=debug is required, not decorative: Celery only logs its
+        # per-task "received" line at DEBUG, and the driver asserts on that line
+        # to prove the task went through the broker instead of being run inline
+        # by the API. --pool=solo matches the documented container command.
+        env:
+          CELERY_TASK_ALWAYS_EAGER: '0'
+          NOTIFY_WEBHOOK_URL: http://127.0.0.1:8099/hook
+        run: |
+          nohup celery -A app.core.workers worker \
+            --loglevel=debug --pool=solo > /tmp/worker.log 2>&1 &
+          for i in $(seq 1 60); do
+            if grep -q "celery@\|ready" /tmp/worker.log; then
+              echo "worker up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/worker.log
+          exit 1
+
+      - name: Start the API against PostgreSQL with a real broker
+        env:
+          # Non-eager, explicitly. This project defaults CELERY_TASK_ALWAYS_EAGER
+          # to 1, which would run notifications inside the API process and make
+          # the worker decorative.
+          CELERY_TASK_ALWAYS_EAGER: '0'
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 \
+            > /tmp/api.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8000/health > /dev/null; then
+              echo "API up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/api.log
+          exit 1
+
+      - name: A real task runs end to end
+        env:
+          DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_deploy
+          CELERY_TASK_ALWAYS_EAGER: '0'
+          NOTIFY_WEBHOOK_URL: http://127.0.0.1:8099/hook
+        run: python scripts/e2e_postgres_worker.py --worker-log /tmp/worker.log
+
+      - name: Dump logs
+        if: failure()
+        run: |
+          echo "=== api ==="; tail -40 /tmp/api.log || true
+          echo "=== worker ==="; tail -40 /tmp/worker.log || true
+          echo "=== receiver ==="; cat /tmp/receiver.log || true

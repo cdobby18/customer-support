@@ -126,7 +126,7 @@ Run the backend tests from another terminal:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Expected current result: `295 passed`.
+Expected current result: `300 passed`.
 
 For an end-to-end API smoke test while the API is running:
 
@@ -242,6 +242,45 @@ Three details that are deliberate rather than incidental:
 The image is built and smoke-tested in CI (`docker` job: build, migrations,
 `/health`, unauthenticated 401, worker task registration, non-root user), which
 is what verifies it — not a local `docker build`.
+
+## Run against real PostgreSQL and a real worker
+
+SQLite is a development convenience and it lies in three ways that matter:
+it does not enforce foreign keys, its `TIMESTAMP` has no timezone, and an
+eager Celery task "running" proves nothing about the queue. The `postgres` CI
+job exists for exactly this, and runs the whole suite plus a full task
+round-trip against real services:
+
+- `services:` PostgreSQL 16 and Redis 7, both health-gated
+- the 300-test suite against PostgreSQL
+- `alembic upgrade head` against an empty PostgreSQL database, asserting the
+  tables it creates
+- the API with `CELERY_TASK_ALWAYS_EAGER=0` and a real worker on a real broker
+- a driver that registers a user, promotes it to admin, creates a ticket, and
+  waits for the outbound webhook — then checks the task's return value came
+  back out of the Redis result backend
+
+To run the same thing by hand, point the driver at services you have running:
+
+```powershell
+$env:DATABASE_URL="postgresql+psycopg://user:pass@localhost:5432/support"
+$env:REDIS_URL="redis://localhost:6379/0"
+$env:CELERY_TASK_ALWAYS_EAGER="0"
+$env:NOTIFY_WEBHOOK_URL="http://127.0.0.1:8099/hook"
+
+.\.venv\Scripts\python.exe scripts\notify_receiver.py 8099
+.\.venv\Scripts\python.exe -m celery -A app.core.workers worker --loglevel=debug --pool=solo
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+.\.venv\Scripts\python.exe scripts\e2e_postgres_worker.py --worker-log worker.log
+```
+
+`--loglevel=debug` is not decoration: Celery only logs its per-task "received"
+line at DEBUG, and the driver asserts on that line to prove the task went
+through the broker rather than being executed inline by the API. Running the
+worker at INFO makes the check unable to fail.
+
+The whole suite can also be pointed at PostgreSQL by setting `TEST_DATABASE_URL`;
+unset, it uses in-memory SQLite as before.
 
 ## Success Metrics
 
