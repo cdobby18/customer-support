@@ -15,6 +15,24 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Alembic creates its alembic_version table with version_num VARCHAR(32)
+    # before the first migration runs. Several of this project's revision ids
+    # are 33-34 characters long (0004_add_structured_triage_fields is 33, the
+    # first to overflow), so on PostgreSQL the UPDATE of version_num fails with
+    # StringDataRightTruncation and upgrade head cannot advance past 0003.
+    # SQLite never enforces the length, which is why only a real run exposes
+    # it. Widen the column here, before any long identifier is written. The
+    # dialect guard keeps the migration a no-op elsewhere and works with the
+    # Docker job's SQLite migration check.
+    if op.get_bind().dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=255),
+            existing_nullable=False,
+        )
+
     op.create_table(
         "tickets",
         sa.Column("id", sa.String(length=36), nullable=False),
