@@ -1,9 +1,13 @@
 """Ticket lifecycle routes: intake, triage updates, comments, feedback and AI drafts."""
 
+import os
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -35,6 +39,7 @@ from app.api.schemas import (
     FeedbackResponse,
     ResponseDraft,
     Ticket,
+    TicketAttachment,
     TicketComment,
     TicketCreate,
     TicketStatus,
@@ -47,6 +52,7 @@ from app.api.schemas import (
 from app.core.database import get_db
 from app.core.models import (
     FeedbackRecord,
+    TicketAttachmentRecord,
     TicketCommentRecord,
     TicketRecord,
     UserRecord,
@@ -57,6 +63,29 @@ from app.core.workers import enqueue_notification
 def ensure_ticket_access(ticket: TicketRecord, user: UserRecord) -> None:
     if not is_staff(user) and ticket.customer_id != user.id:
         raise HTTPException(status_code=403, detail="You do not have access to this ticket")
+
+
+def build_ticket_stats(db: Session, tickets: list[TicketRecord]) -> dict[str, dict]:
+    """Public (non-internal) message stats per ticket, newest first."""
+    if not tickets:
+        return {}
+    customers = {record.id: record.customer_id for record in tickets}
+    stats: dict[str, dict] = {record.id: {} for record in tickets}
+    comments = db.scalars(
+        select(TicketCommentRecord)
+        .where(
+            TicketCommentRecord.ticket_id.in_([record.id for record in tickets]),
+            TicketCommentRecord.is_internal.is_(False),
+        )
+        .order_by(TicketCommentRecord.created_at.desc())
+    ).all()
+    for comment in comments:
+        entry = stats[comment.ticket_id]
+        entry["message_count"] = entry.get("message_count", 0) + 1
+        if "last_message_at" not in entry:
+            entry["last_message_at"] = comment.created_at
+            entry["last_message_external"] = comment.author_id != customers[comment.ticket_id]
+    return stats
 
 
 router = APIRouter()
@@ -250,7 +279,12 @@ def list_tickets(
         query = query.where(TicketRecord.status == ticket_status.value)
     if customer_id is not None:
         query = query.where(TicketRecord.customer_id == customer_id)
-    return [to_ticket(record, staff_view=staff_view) for record in db.scalars(query).all()]
+    records = db.scalars(query).all()
+    stats = build_ticket_stats(db, records)
+    return [
+        to_ticket(record, staff_view=staff_view, **stats[record.id])
+        for record in records
+    ]
 
 
 
@@ -264,7 +298,8 @@ def get_ticket(
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     ensure_ticket_access(record, current_user)
-    return to_ticket(record, staff_view=is_staff(current_user))
+    stats = build_ticket_stats(db, [record])
+    return to_ticket(record, staff_view=is_staff(current_user), **stats[record.id])
 
 
 
@@ -427,6 +462,138 @@ def list_comments(
         # Internal notes are staff-only. The ticket owner is not staff.
         query = query.where(TicketCommentRecord.is_internal.is_(False))
     return [to_comment(record) for record in db.scalars(query).all()]
+
+
+def _upload_dir() -> str:
+    path = os.getenv("UPLOAD_DIR", ".uploads")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _safe_filename(filename: str) -> str:
+    base = Path(filename).name.strip()
+    base = re.sub(r"[^\w.\- ]", "_", base)
+    return base[:120] or "file"
+
+
+@router.post(
+    "/tickets/{ticket_id}/attachments",
+    response_model=list[TicketAttachment],
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_attachments(
+    ticket_id: UUID,
+    files: list[UploadFile] = File(...),
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[TicketAttachment]:
+    ticket = db.get(TicketRecord, str(ticket_id))
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    ensure_ticket_access(ticket, current_user)
+    max_files = int(os.getenv("MAX_TICKET_ATTACHMENTS", "5"))
+    max_bytes = int(os.getenv("MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024)))
+    if len(files) > max_files:
+        raise HTTPException(status_code=400, detail=f"At most {max_files} files per upload")
+    existing = db.scalars(
+        select(TicketAttachmentRecord).where(TicketAttachmentRecord.ticket_id == str(ticket_id))
+    ).all()
+    if len(existing) + len(files) > max_files:
+        raise HTTPException(status_code=400, detail=f"Ticket already has {len(existing)} attachments")
+    created: list[TicketAttachment] = []
+    for request_file in files:
+        payload = request_file.file.read()
+        request_file.file.close()
+        if len(payload) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"{request_file.filename} exceeds the {max_bytes // (1024 * 1024)}MB limit")
+        if len(payload) == 0:
+            raise HTTPException(status_code=400, detail=f"{request_file.filename} is empty")
+        record = TicketAttachmentRecord(
+            id=str(uuid4()),
+            ticket_id=str(ticket_id),
+            filename=_safe_filename(request_file.filename or ""),
+            content_type=request_file.content_type,
+            size=len(payload),
+            storage_path=str(uuid4()),
+            uploaded_by=current_user.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        with open(os.path.join(_upload_dir(), record.storage_path), "wb") as handle:
+            handle.write(payload)
+        db.add(record)
+        created.append(
+            TicketAttachment(
+                id=UUID(record.id),
+                ticket_id=UUID(record.ticket_id),
+                filename=record.filename,
+                content_type=record.content_type,
+                size=record.size,
+                uploaded_by=record.uploaded_by,
+                created_at=record.created_at,
+            )
+        )
+    db.commit()
+    return created
+
+
+@router.get("/tickets/{ticket_id}/attachments", response_model=list[TicketAttachment])
+def list_attachments(
+    ticket_id: UUID,
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[TicketAttachment]:
+    ticket = db.get(TicketRecord, str(ticket_id))
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    ensure_ticket_access(ticket, current_user)
+    records = db.scalars(
+        select(TicketAttachmentRecord)
+        .where(TicketAttachmentRecord.ticket_id == str(ticket_id))
+        .order_by(TicketAttachmentRecord.created_at)
+    ).all()
+    return [
+        TicketAttachment(
+            id=UUID(record.id),
+            ticket_id=UUID(record.ticket_id),
+            filename=record.filename,
+            content_type=record.content_type,
+            size=record.size,
+            uploaded_by=record.uploaded_by,
+            created_at=record.created_at,
+        )
+        for record in records
+    ]
+
+
+@router.get("/tickets/{ticket_id}/attachments/{attachment_id}/content")
+def download_attachment(
+    ticket_id: UUID,
+    attachment_id: UUID,
+    current_user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    ticket = db.get(TicketRecord, str(ticket_id))
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    ensure_ticket_access(ticket, current_user)
+    record = db.scalars(
+        select(TicketAttachmentRecord).where(
+            TicketAttachmentRecord.ticket_id == str(ticket_id),
+            TicketAttachmentRecord.id == str(attachment_id),
+        )
+    ).one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    path = os.path.join(_upload_dir(), record.storage_path)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Attachment content is missing")
+    with open(path, "rb") as handle:
+        content = handle.read()
+    return Response(
+        content=content,
+        media_type=record.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{record.filename}"'},
+    )
 
 
 

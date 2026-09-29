@@ -57,7 +57,10 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 cors_origins = [
     origin.strip()
     for origin in os.getenv(
-        "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+        # 5174 is the Vite fallback port when 5173 is already taken; both are
+        # dev-only and both must be able to call the API from a browser.
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
     ).split(",")
     if origin.strip()
 ]

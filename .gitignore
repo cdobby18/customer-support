@@ -37,3 +37,8 @@ md-files/
 # Scratch scripts kept out of the repo
 check_db.py
 test_semantic.py
+
+
+# Uploaded ticket attachments (runtime data)
+.uploads/
+

@@ -103,6 +103,61 @@ def test_ticket_comments_are_stored_and_listed() -> None:
     assert listed_comments.json()[0]["is_internal"] is True
 
 
+def test_ticket_list_carries_public_message_stats() -> None:
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-6", "message": "My printer is offline"},
+    ).json()
+    client.post(
+        f"/tickets/{created['id']}/comments",
+        headers=admin_headers(),
+        json={"author_id": "agent-9", "body": "We are looking into it", "is_internal": False},
+    )
+    client.post(
+        f"/tickets/{created['id']}/comments",
+        headers=admin_headers(),
+        json={"author_id": "agent-9", "body": "Internal only", "is_internal": True},
+    )
+
+    listed = client.get("/tickets", headers=admin_headers()).json()
+    row = next(ticket for ticket in listed if ticket["id"] == created["id"])
+
+    assert row["message_count"] == 1
+    assert row["last_message_external"] is True
+    assert row["last_message_at"] is not None
+
+    single = client.get(f"/tickets/{created['id']}", headers=admin_headers()).json()
+    assert single["message_count"] == 1
+    assert single["last_message_external"] is True
+
+
+def test_last_message_external_is_false_when_customer_replies_last() -> None:
+    customer_id, headers = make_customer("notify@example.com")
+    created = client.post(
+        "/tickets",
+        headers=headers,
+        json={"customer_id": customer_id, "message": "Order status please"},
+    ).json()
+    client.post(
+        f"/tickets/{created['id']}/comments",
+        headers=admin_headers(),
+        json={"author_id": "admin-1", "body": "We are checking with the warehouse", "is_internal": False},
+    )
+    client.post(
+        f"/tickets/{created['id']}/comments",
+        headers=headers,
+        json={"body": "Any update?"},
+    )
+
+    row = client.get("/tickets", headers=headers).json()[0]
+
+    assert row["id"] == created["id"]
+    assert row["message_count"] == 2
+    assert row["last_message_external"] is False
+    assert row["last_message_at"] is not None
+
+
 def test_tickets_can_be_filtered_by_status() -> None:
     created = client.post(
         "/tickets",
@@ -2072,3 +2127,67 @@ def test_agent_assist_works_without_llm_gateway(monkeypatch: pytest.MonkeyPatch)
     assert body["summary"]
     assert body["provider"] == ""
     assert body["suggested_replies"] == []
+
+
+def test_ticket_attachments_upload_list_and_download() -> None:
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-8", "message": "Here is the file"},
+    ).json()
+    upload = client.post(
+        f"/tickets/{created['id']}/attachments",
+        headers=admin_headers(),
+        files=[("files", ("receipt.txt", b"hello attachment", "text/plain"))],
+    )
+
+    assert upload.status_code == 201
+    uploaded = upload.json()
+    assert uploaded[0]["filename"] == "receipt.txt"
+    assert uploaded[0]["size"] == len(b"hello attachment")
+
+    listed = client.get(f"/tickets/{created['id']}/attachments", headers=admin_headers())
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+    content = client.get(
+        f"/tickets/{created['id']}/attachments/{uploaded[0]['id']}/content",
+        headers=admin_headers(),
+)
+    assert content.status_code == 200
+    assert content.content == b"hello attachment"
+    assert content.headers["content-type"].startswith("text/plain")
+
+
+def test_customer_cannot_upload_to_someone_elses_ticket() -> None:
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-9", "message": "private"},
+    ).json()
+    _, headers = make_customer("other-att@example.com")
+
+    upload = client.post(
+        f"/tickets/{created['id']}/attachments",
+        headers=headers,
+        files=[("files", ("leak.txt", b"nope", "text/plain"))],
+    )
+
+    assert upload.status_code == 403
+
+
+def test_attachment_upload_enforces_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "8")
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-10", "message": "big file"},
+    ).json()
+
+    upload = client.post(
+        f"/tickets/{created['id']}/attachments",
+        headers=admin_headers(),
+        files=[("files", ("big.bin", b"x" * 64, "application/octet-stream"))],
+    )
+
+    assert upload.status_code == 413

@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from types import SimpleNamespace
 
-from app.core.models import AuditLogRecord, TicketCommentRecord, TicketRecord, UserRecord
+from app.core.models import AuditLogRecord, FeedbackRecord, TicketCommentRecord, TicketRecord, UserRecord
 from harness import ADMIN_ID, client, drop_schema, reset_schema, seed_admin, test_engine
 
 PASSWORD = "correct horse battery"
@@ -483,3 +483,35 @@ def test_staff_roster_requires_staff_or_admin() -> None:
     customer = make_user("plain@example.com", "customer")
     assert client.get("/users/staff", headers=login(customer.email)).status_code == 403
     assert client.get("/users/staff").status_code == 401
+
+
+def test_feedback_details_returns_ticket_context() -> None:
+    customer = make_user("rater@example.com", "customer")
+    ticket_id = insert_ticket(customer.id)
+    with Session(test_engine) as session:
+        session.add(
+            FeedbackRecord(
+                id=str(uuid4()),
+                ticket_id=ticket_id,
+                rating=5,
+                comment="Great support",
+                created_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()
+
+    response = client.get("/admin/analytics/feedback-details", headers=admin_headers())
+
+    assert response.status_code == 200
+    entries = response.json()
+    assert len(entries) == 1
+    assert entries[0]["rating"] == 5
+    assert entries[0]["comment"] == "Great support"
+    assert entries[0]["ticket_id"] == ticket_id
+    assert entries[0]["message"] == "My export crashes every time I run it"
+    assert entries[0]["customer_id"] == customer.id
+
+
+def test_feedback_details_is_admin_only() -> None:
+    agent = make_user("nofeedback@example.com", "agent")
+    assert client.get("/admin/analytics/feedback-details", headers=login(agent.email)).status_code == 403

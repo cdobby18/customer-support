@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
-import { useEffect, useState } from "react";
-import { Activity, AlertTriangle, ArrowRight, BarChart3, BookOpen, Check, CheckCircle2, CircleAlert, Clock, Eye, FileText, Gauge, Gavel, Hash, Inbox, LifeBuoy, Lock, LogOut, MessageSquare, Plus, RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Star, Timer, Trash2, TrendingUp, UserCog, UserRound, Users, X, XCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Activity, AlertTriangle, ArrowRight, BarChart3, BookOpen, Check, CheckCircle2, CircleAlert, Clock, Download, Eye, FileText, Gauge, Gavel, Globe, Hash, Inbox, LifeBuoy, Lock, LogOut, Mail, MessageCircle, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Star, Timer, Trash2, TrendingUp, UserCog, UserRound, Users, X, XCircle } from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -15,6 +15,23 @@ async function apiRequest(path, options = {}, token = null) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${API_URL}${path}`, { ...options, headers });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401 && token && onSessionExpired) onSessionExpired();
+    const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    throw new Error(detail || "Something went wrong");
+  }
+  return body;
+}
+
+async function uploadAttachments(ticketId, files, token) {
+  const form = new FormData();
+  for (const file of files) form.append("files", file, file.name);
+  const response = await fetch(`${API_URL}/tickets/${ticketId}/attachments`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && token && onSessionExpired) onSessionExpired();
@@ -49,6 +66,17 @@ function formatDate(dateStr) {
 function priorityClass(priority) {
   const classes = { urgent: "urgent", high: "high", normal: "normal" };
   return classes[priority] || "normal";
+}
+
+const CHANNEL_META = {
+  web: { label: "Web", icon: <Globe size={12} /> },
+  slack: { label: "Slack", icon: <Hash size={12} /> },
+  whatsapp: { label: "WhatsApp", icon: <MessageCircle size={12} /> },
+  email: { label: "Email", icon: <Mail size={12} /> },
+};
+
+function channelMeta(channel) {
+  return CHANNEL_META[channel] || { label: channel || "unknown", icon: <Hash size={12} /> };
 }
 
 const TOPIC_PRESETS = {
@@ -87,7 +115,7 @@ function AuthScreen({ onAuthenticated, banner }) {
     <main className="auth-shell">
       <section className="auth-intro">
         <div className="brand-mark"><span>R</span></div>
-        <p className="eyebrow">Relay / support operations</p>
+        <p className="eyebrow">RESOLVE / customer support</p>
         <h1>Where conversations become resolutions.</h1>
         <p className="intro-copy">Understand faster. Act smarter. Resolve better.</p>
         <div className="signal-row"><ShieldCheck size={17} /> Human oversight built into every escalation.</div>
@@ -105,8 +133,8 @@ function AuthScreen({ onAuthenticated, banner }) {
         <form onSubmit={submit} className="auth-form">
           <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="user@gmail.com" required /></label>
           <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" minLength="8" required /></label>
-          {banner && <div className="error-box"><CircleAlert size={16} /> {banner}</div>}
-          {error && <div className="error-box"><CircleAlert size={16} /> {error}</div>}
+          {banner && <div className="error-box" role="alert"><CircleAlert size={16} /> {banner}</div>}
+          {error && <div className="error-box" role="alert"><CircleAlert size={16} /> {error}</div>}
           <button className="primary-button" disabled={loading}>{loading ? "Working..." : mode === "login" ? "Open support desk" : "Create account"}<ArrowRight size={17} /></button>
         </form>
       </section>
@@ -120,6 +148,7 @@ function AdminTeamPanel({ session }) {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("agent");
   const [notice, setNotice] = useState("");
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   async function loadUsers() {
     try { setUsers(await apiRequest("/admin/users", {}, session.access_token)); }
@@ -145,11 +174,16 @@ function AdminTeamPanel({ session }) {
 
   async function deleteUser(user) {
     if (user.id === session.user.id) return;
-    if (!window.confirm(`Delete ${user.email}? This cannot be undone.`)) return;
+    setPendingDelete(user);
+  }
+
+  async function confirmDeleteUser() {
+    if (!pendingDelete) return;
     try {
-      await apiRequest(`/admin/users/${user.id}`, { method: "DELETE" }, session.access_token);
+      await apiRequest(`/admin/users/${pendingDelete.id}`, { method: "DELETE" }, session.access_token);
       setNotice("User deleted"); await loadUsers();
     } catch (error) { setNotice(error.message); }
+    finally { setPendingDelete(null); }
   }
 
   return (
@@ -162,7 +196,7 @@ function AdminTeamPanel({ session }) {
         </div>
         <span>{users.length} users</span>
       </div>
-      {notice && <div className="team-notice">{notice}</div>}
+      {notice && <div className="team-notice" role="status">{notice}</div>}
       <form className="team-form" onSubmit={createUser}>
         <div className="form-group">
           <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="staff@company.com" required /></label>
@@ -204,6 +238,7 @@ function AdminTeamPanel({ session }) {
         ))}
         {users.length === 0 && <div className="empty-team">No team members yet. Add your first agent or admin above.</div>}
       </div>
+      <ConfirmDialog open={!!pendingDelete} title="Delete team member" message={`Delete ${pendingDelete?.email ?? ""}? This cannot be undone.`} confirmLabel="Delete" danger onConfirm={confirmDeleteUser} onClose={() => setPendingDelete(null)} />
     </section>
   );
 }
@@ -211,17 +246,91 @@ function AdminTeamPanel({ session }) {
 function AuditActivity({ session }) {
   const [logs, setLogs] = useState([]);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [purging, setPurging] = useState(false);
+  const [confirmPurge, setConfirmPurge] = useState(false);
+  const AUDIT_PAGE = 20;
 
-  useEffect(() => {
-    apiRequest("/admin/audit-logs?limit=5", {}, session.access_token)
-      .then(setLogs)
-      .catch((requestError) => setError(requestError.message));
-  }, []);
+  async function loadLogs(offset = 0) {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest(`/admin/audit-logs?limit=${AUDIT_PAGE}&offset=${offset}`, {}, session.access_token);
+      setLogs((current) => (offset === 0 ? result : [...current, ...result]));
+    } catch (requestError) { setError(requestError.message); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { loadLogs(0); }, []);
+
+  async function purgeLogs() {
+    setPurging(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await apiRequest("/admin/audit-logs/purge", { method: "POST" }, session.access_token);
+      setNotice(`Purged ${result.deleted} old events (retention ${result.retention_days}d)`);
+      await loadLogs(0);
+    } catch (requestError) { setError(requestError.message); }
+    finally { setPurging(false); setConfirmPurge(false); }
+  }
 
   return (
     <section className="audit-panel">
-      <div className="team-heading"><div><p className="eyebrow">Traceability</p><h2><Activity size={19} /> Recent activity</h2><p className="muted">A record of important changes across the workspace.</p></div><span>{logs.length} recent events</span></div>
-      {error ? <div className="team-notice error-text">{error}</div> : logs.length ? <div className="audit-list">{logs.map((log) => <article className="audit-row" key={log.id}><div className="audit-icon"><Activity size={14} /></div><div className="audit-copy"><strong>{log.action.replaceAll(".", " / ")}</strong><small>{log.entity_type} · {log.entity_id.slice(0, 8)} · {log.actor_id ? `by ${log.actor_id.slice(0, 8)}` : "system"}</small></div><time>{new Date(log.created_at).toLocaleString()}</time></article>)}</div> : <div className="empty-audit">No activity recorded yet.</div>}
+      <div className="team-heading"><div><p className="eyebrow">Traceability</p><h2><Activity size={19} /> Recent activity</h2><p className="muted">A record of important changes across the workspace.</p></div><div className="team-heading-actions"><button className="secondary-button" onClick={() => loadLogs(0)} disabled={loading}><RefreshCw size={14} /> Refresh</button><button className="secondary-button" onClick={() => setConfirmPurge(true)} disabled={purging}><Trash2 size={14} /> {purging ? "Purging..." : "Purge old"}</button></div></div>
+      {notice && <div className="team-notice" role="status">{notice}</div>}
+      {error ? <div className="team-notice error-text">{error}</div> : logs.length ? <div className="audit-list">{logs.map((log) => <article className="audit-row" key={log.id}><div className="audit-icon"><Activity size={14} /></div><div className="audit-copy"><strong>{log.action.replaceAll(".", " / ")}</strong><small>{log.entity_type} · {log.entity_id.slice(0, 8)} · {log.actor_id ? `by ${log.actor_id.slice(0, 8)}` : "system"}</small></div><time>{formatDate(log.created_at)}</time></article>)}</div> : <div className="empty-audit">No activity recorded yet.</div>}
+      {logs.length > 0 && <button className="show-more" onClick={() => loadLogs(logs.length)} disabled={loading}>{loading ? "Loading..." : "Load more"}</button>}
+      <ConfirmDialog open={confirmPurge} title="Purge audit history" message="Delete audit history beyond the retention window? This cannot be undone." confirmLabel="Purge" danger onConfirm={purgeLogs} onClose={() => setConfirmPurge(false)} />
+    </section>
+  );
+}
+
+function FeedbackDrillDown({ session }) {
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState("");
+
+  async function loadFeedback() {
+    setError("");
+    try {
+      setItems(await apiRequest("/admin/analytics/feedback-details", {}, session.access_token));
+    } catch (requestError) { setError(requestError.message); }
+  }
+
+  useEffect(() => { loadFeedback(); }, [session.access_token]);
+
+  return (
+    <section className="analytics-panel">
+      <div className="team-heading">
+        <div>
+          <p className="eyebrow">Customer feedback</p>
+          <h2><Star size={19} /> CSAT reports</h2>
+          <p className="muted">Individual ratings and notes left on resolved conversations.</p>
+        </div>
+        <button className="secondary-button" onClick={loadFeedback}><RefreshCw size={14} /> {items === null ? "Loading..." : `Refresh (${items.length})`}</button>
+      </div>
+      {error && <div className="team-notice error-text">{error}</div>}
+      {items === null ? (
+        <div className="empty-state"><Star size={28} /><strong>Loading feedback...</strong></div>
+      ) : items.length ? (
+        <div className="audit-list">
+          {items.map((entry) => (
+            <article className="audit-row" key={entry.id}>
+              <div className="feedback-rating" aria-label={`${entry.rating} star${entry.rating > 1 ? "s" : ""}`}>
+                {[1, 2, 3, 4, 5].map((star) => <Star key={star} size={14} className={star <= entry.rating ? "filled" : ""} />)}
+              </div>
+              <div className="audit-copy">
+                <strong>{entry.message || "Ticket removed"}</strong>
+                <small>{entry.customer_id || "unknown customer"}{entry.comment ? ` · "${entry.comment}"` : ""}</small>
+              </div>
+              <time>{formatDate(entry.created_at)}</time>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-audit">No feedback recorded yet.</div>
+      )}
     </section>
   );
 }
@@ -328,6 +437,63 @@ function AnalyticsView({ session }) {
   );
 }
 
+function LlmUsageView({ session }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  async function loadUsage() {
+    try { setData(await apiRequest("/admin/llm/usage", {}, session.access_token)); }
+    catch (requestError) { setError(requestError.message); }
+  }
+
+  useEffect(() => { loadUsage(); }, [session.access_token]);
+
+  async function resetUsage() {
+    setResetting(true);
+    setError("");
+    try { setData(await apiRequest("/admin/llm/usage/reset", { method: "POST" }, session.access_token)); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setResetting(false); setConfirmReset(false); }
+  }
+
+  if (error) return <section className="analytics-panel"><div className="team-notice error-text">{error}</div></section>;
+  if (!data) return <section className="analytics-panel"><div className="empty-state"><Gauge size={28} /><strong>Loading LLM usage...</strong></div></section>;
+
+  return (
+    <section className="analytics-panel">
+      <div className="team-heading">
+        <div>
+          <p className="eyebrow">Model spend</p>
+          <h2><Gauge size={19} /> LLM usage</h2>
+          <p className="muted">Token and cost counters tracked by the LLM gateway.</p>
+        </div>
+        <button className="secondary-button" onClick={() => setConfirmReset(true)} disabled={resetting}>{resetting ? "Resetting..." : "Reset counters"}</button>
+      </div>
+      <div className="analytics-stats">
+        <StatCard icon={<MessageSquare size={17} />} label="Total calls" value={data.total_calls} tone="teal" />
+        <StatCard icon={<FileText size={17} />} label="Prompt tokens" value={data.total_prompt_tokens.toLocaleString()} tone="teal" />
+        <StatCard icon={<Sparkles size={17} />} label="Completion tokens" value={data.total_completion_tokens.toLocaleString()} tone="teal" />
+        <StatCard icon={<Gauge size={17} />} label="Est. cost" value={`$${data.total_cost_usd.toFixed(4)}`} tone="amber" />
+      </div>
+      {data.since && <p className="analytics-footnote">Counters collected since {data.since}</p>}
+      <article className="analytics-card">
+        <header><h4><Activity size={15} /> Usage by model</h4></header>
+        <div className="usage-model-list">
+          {data.by_model.length ? data.by_model.map((entry) => (
+            <div className="usage-model-row" key={entry.model}>
+              <div><strong>{entry.model || "unset"}</strong><span className="usage-model-meta">{entry.calls} calls · {entry.prompt_tokens.toLocaleString()} prompt · {entry.completion_tokens.toLocaleString()} completion</span></div>
+              <span className="usage-model-cost">${entry.cost_usd.toFixed(4)}</span>
+            </div>
+          )) : <div className="empty-audit">No LLM calls recorded yet.</div>}
+        </div>
+      </article>
+      <ConfirmDialog open={confirmReset} title="Reset LLM counters" message="Reset all call, token and cost counters? This cannot be undone." confirmLabel="Reset" danger onConfirm={resetUsage} onClose={() => setConfirmReset(false)} />
+    </section>
+  );
+}
+
 function EscalationReviewPanel({ session }) {
   const [escalations, setEscalations] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -383,7 +549,7 @@ function EscalationReviewPanel({ session }) {
         </div>
         <span>{escalations.length} pending</span>
       </div>
-      {notice && <div className="team-notice">{notice}</div>}
+      {notice && <div className="team-notice" role="status">{notice}</div>}
       <div className="review-grid">
         <div className="review-list-column">
           {loading ? (
@@ -526,6 +692,8 @@ function AiDraftPanel({ session }) {
   const [deciding, setDeciding] = useState(false);
   const [resolveOnApprove, setResolveOnApprove] = useState(true);
   const [notice, setNotice] = useState("");
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [rejectNote, setRejectNote] = useState("");
 
   const selectedTicket = tickets.find((ticket) => ticket.id === selectedId) || null;
 
@@ -575,13 +743,18 @@ function AiDraftPanel({ session }) {
 
   async function rejectDraft() {
     if (!selectedTicket || !draft) return;
-    const note = window.prompt("Reason for rejecting this AI draft (optional):") ?? "";
+    setRejectNote("");
+    setRejectOpen(true);
+  }
+
+  async function confirmRejectDraft() {
+    if (!selectedTicket || !draft) return;
     setDeciding(true);
     setNotice("");
     try {
-      const result = await apiRequest(
+      await apiRequest(
         `/tickets/${selectedTicket.id}/draft-decision`,
-        { method: "POST", body: JSON.stringify({ decision: "reject", note: note.trim() || null }) },
+        { method: "POST", body: JSON.stringify({ decision: "reject", note: rejectNote.trim() || null }) },
         session.access_token,
       );
       setNotice("Draft rejected — ticket stays with a human agent.");
@@ -589,7 +762,7 @@ function AiDraftPanel({ session }) {
       setAutoResult(null);
       await loadTickets();
     } catch (error) { setNotice(error.message); }
-    finally { setDeciding(false); }
+    finally { setDeciding(false); setRejectOpen(false); }
   }
 
   async function runAutoRespond() {
@@ -615,7 +788,7 @@ function AiDraftPanel({ session }) {
         </div>
         <span>{drafting ? "generating..." : `${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`}</span>
       </div>
-      {notice && <div className="team-notice">{notice}</div>}
+      {notice && <div className="team-notice" role="status">{notice}</div>}
       <div className="review-grid">
         <div className="review-list-column">
           {loading ? (
@@ -755,6 +928,9 @@ function AiDraftPanel({ session }) {
           )}
         </div>
       </div>
+      <ConfirmDialog open={rejectOpen} title="Reject AI draft" message="Confirm you want to discard this draft. The ticket stays with a human agent." confirmLabel="Reject draft" danger onConfirm={confirmRejectDraft} onClose={() => setRejectOpen(false)}>
+        <label className="modal-field">Reason (optional)<textarea rows="3" value={rejectNote} onChange={(event) => setRejectNote(event.target.value)} placeholder="Explain why this draft needs a human…" /></label>
+      </ConfirmDialog>
     </section>
   );
 }
@@ -765,6 +941,30 @@ function StarRating({ value, onSelect }) {
       {[1, 2, 3, 4, 5].map((star) => (
         <button type="button" key={star} className={star <= value ? "filled" : ""} onClick={() => onSelect(star)} aria-label={`Rate ${star} star${star > 1 ? "s" : ""}`}><Star size={22} /></button>
       ))}
+    </div>
+  );
+}
+
+function ConfirmDialog({ open, title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", danger = false, onConfirm, onClose, children }) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
+        <h3>{title}</h3>
+        {message && <p>{message}</p>}
+        {children}
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose} autoFocus>{cancelLabel}</button>
+          <button className={`primary-button ${danger ? "danger-button" : ""}`} onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -955,23 +1155,53 @@ function AppShell({ session, onLogout }) {
   const [staff, setStaff] = useState([]);
   const [assigneeFilter, setAssigneeFilter] = useState("");
   const [isInternal, setIsInternal] = useState(true);
+  const [health, setHealth] = useState("loading");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [unseen, setUnseen] = useState({});
+  const [newReplyId, setNewReplyId] = useState(null);
+  const [attachments, setAttachments] = useState([]);
+  const [newFiles, setNewFiles] = useState([]);
+  const [newTicketFiles, setNewTicketFiles] = useState([]);
+  const [uploading, setUploading] = useState(false);
 
   const selectedTicket = tickets.find((ticket) => ticket.id === selectedId) || null;
   const isStaff = session.user.role !== "customer";
 
-  async function loadTickets() {
-    setLoading(true);
+  async function loadTickets(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const path = statusFilter ? `/tickets?status=${encodeURIComponent(statusFilter)}` : "/tickets";
       const result = await apiRequest(path, {}, session.access_token);
       setTickets(result);
       if (!selectedId && result.length) setSelectedId(result[0].id);
       if (selectedId && !result.some((ticket) => ticket.id === selectedId)) setSelectedId(result[0]?.id || null);
-    } catch (error) { setNotice(error.message); }
-    finally { setLoading(false); }
+    } catch (error) { if (!silent) setNotice(error.message); }
+    finally { if (!silent) setLoading(false); }
   }
 
+  const loadTicketsRef = useRef(loadTickets);
+  loadTicketsRef.current = loadTickets;
+
   useEffect(() => { loadTickets(); }, [statusFilter, activeView]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const checkHealth = async () => {
+      try {
+        const response = await fetch(`${API_URL}/health`);
+        const body = await response.json().catch(() => ({}));
+        if (!cancelled) setHealth(body.status === "ok" ? "healthy" : "degraded");
+      } catch {
+        if (!cancelled) setHealth("down");
+      }
+    };
+    checkHealth();
+    const healthTimer = setInterval(checkHealth, 15000);
+    const queueTimer = setInterval(() => {
+      if (activeView === "inbox" || activeView === "conversations") loadTicketsRef.current(true);
+    }, 15000);
+    return () => { cancelled = true; clearInterval(healthTimer); clearInterval(queueTimer); };
+  }, [activeView]);
 
   useEffect(() => {
     if (!isStaff) return;
@@ -981,9 +1211,44 @@ function AppShell({ session, onLogout }) {
   }, [session.access_token]);
 
   useEffect(() => {
-    if (!selectedTicket) { setComments([]); return; }
+    if (!selectedTicket) { setComments([]); setAttachments([]); return; }
     apiRequest(`/tickets/${selectedTicket.id}/comments`, {}, session.access_token).then(setComments).catch((error) => setNotice(error.message));
+    apiRequest(`/tickets/${selectedTicket.id}/attachments`, {}, session.access_token).then(setAttachments).catch(() => setAttachments([]));
   }, [selectedId]);
+
+  useEffect(() => {
+    if (isStaff || !selectedTicket || !selectedTicket.last_message_at) return;
+    localStorage.setItem(`resolveSeen:${selectedTicket.id}`, selectedTicket.last_message_at);
+    if (unseen[selectedTicket.id]) setUnseen((prev) => ({ ...prev, [selectedTicket.id]: false }));
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (isStaff) return;
+    for (const ticket of tickets) {
+      if (!ticket.last_message_external || !ticket.last_message_at) continue;
+      const seenAt = Date.parse(localStorage.getItem(`resolveSeen:${ticket.id}`) || "") || 0;
+      if (Date.parse(ticket.last_message_at) > seenAt) {
+        setUnseen((prev) => (prev[ticket.id] ? prev : { ...prev, [ticket.id]: true }));
+        if (selectedId !== ticket.id) {
+          setNewReplyId((prev) => prev || ticket.id);
+        }
+      }
+    }
+  }, [tickets]);
+
+  function openNewReply() {
+    if (!newReplyId) return;
+    setSelectedId(newReplyId);
+    const replied = tickets.find((ticket) => ticket.id === newReplyId);
+    if (replied?.last_message_at) localStorage.setItem(`resolveSeen:${newReplyId}`, replied.last_message_at);
+    setUnseen((prev) => ({ ...prev, [newReplyId]: false }));
+    setNewReplyId(null);
+  }
+
+  function selectTicket(ticket) {
+    setSelectedId(ticket.id);
+    if (newReplyId === ticket.id) setNewReplyId(null);
+  }
 
   useEffect(() => {
     if (activeView === "escalations" || activeView === "help" || !tickets.length) return;
@@ -1001,7 +1266,23 @@ function AppShell({ session, onLogout }) {
     try {
       const message = topic ? `[${topic}] ${newMessage.trim()}` : newMessage.trim();
       const ticket = await apiRequest("/tickets", { method: "POST", body: JSON.stringify({ customer_id: session.user.id, message, channel: "web" }) }, session.access_token);
-      setNewMessage(""); setTopic(""); setNotice("Ticket created"); await loadTickets(); setSelectedId(ticket.id);
+      setNewMessage(""); setTopic("");
+      await loadTickets(); setSelectedId(ticket.id);
+      if (newTicketFiles.length) {
+        setUploading(true);
+        try {
+          const uploaded = await uploadAttachments(ticket.id, newTicketFiles, session.access_token);
+          setNewTicketFiles([]);
+          setAttachments(uploaded);
+          setNotice(uploaded.length ? `Ticket created with ${uploaded.length} attachment${uploaded.length > 1 ? "s" : ""}` : "Ticket created");
+        } catch (error) {
+          setNotice(error.message);
+        } finally {
+          setUploading(false);
+        }
+      } else {
+        setNotice("Ticket created");
+      }
     } catch (error) { setNotice(error.message); }
   }
 
@@ -1033,6 +1314,33 @@ function AppShell({ session, onLogout }) {
     try {
       const created = await apiRequest(`/tickets/${selectedTicket.id}/comments`, { method: "POST", body: JSON.stringify({ author_id: session.user.id, body: comment, is_internal: isStaff && isInternal }) }, session.access_token);
       setComments((current) => [...current, created]); setComment("");
+      if (newFiles.length) {
+        setUploading(true);
+        try {
+          const uploaded = await uploadAttachments(selectedTicket.id, newFiles, session.access_token);
+          setNewFiles([]);
+          setAttachments((current) => [...current, ...uploaded]);
+        } catch (error) { setNotice(error.message); }
+        finally { setUploading(false); }
+      }
+    } catch (error) { setNotice(error.message); }
+  }
+
+  async function downloadAttachment(attachment) {
+    try {
+      const response = await fetch(`${API_URL}/tickets/${selectedTicket.id}/attachments/${attachment.id}/content`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!response.ok) throw new Error("Download failed");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = attachment.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
     } catch (error) { setNotice(error.message); }
   }
 
@@ -1056,11 +1364,16 @@ function AppShell({ session, onLogout }) {
   }
 
   async function deleteTicket() {
-    if (!selectedTicket || !window.confirm("Delete this ticket and all its messages? This cannot be undone.")) return;
+    if (!selectedTicket) return;
+    setConfirmDelete(true);
+  }
+
+  async function confirmDeleteTicket() {
+    if (!selectedTicket) return;
     try {
       await apiRequest(`/tickets/${selectedTicket.id}`, { method: "DELETE" }, session.access_token);
-      setNotice("Ticket deleted"); setSelectedId(null); await loadTickets();
-    } catch (error) { setNotice(error.message); }
+      setNotice("Ticket deleted"); setSelectedId(null); setConfirmDelete(false); await loadTickets();
+    } catch (error) { setNotice(error.message); setConfirmDelete(false); }
   }
 
   const viewTickets = tickets.filter((ticket) =>
@@ -1107,17 +1420,26 @@ return (
           <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => setActiveView("conversations")}><MessageSquare size={17} /> Conversations <span>{tickets.filter(t => ["resolved", "closed"].includes(t.status)).length}</span></button>
           <button className={`nav-item ${activeView === "help" ? "active" : ""}`} onClick={() => setActiveView("help")}><BookOpen size={17} /> Help center</button>
           {session.user.role === "admin" && <button className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => setActiveView("analytics")}><BarChart3 size={17} /> Analytics</button>}
+          {session.user.role === "admin" && <button className={`nav-item ${activeView === "feedback" ? "active" : ""}`} onClick={() => setActiveView("feedback")}><Star size={17} /> Feedback</button>}
+          {session.user.role === "admin" && <button className={`nav-item ${activeView === "llm" ? "active" : ""}`} onClick={() => setActiveView("llm")}><Gauge size={17} /> LLM usage</button>}
           {session.user.role === "admin" && <button className={`nav-item ${activeView === "team" ? "active" : ""}`} onClick={() => setActiveView("team")}><UserCog size={17} /> Team</button>}
           {session.user.role === "admin" && <button className={`nav-item ${activeView === "audit" ? "active" : ""}`} onClick={() => setActiveView("audit")}><Activity size={17} /> Audit</button>}
         </nav>
-        <div className="sidebar-bottom"><div className="user-chip"><div className="avatar"><UserRound size={16} /></div><div><strong>{session.user.email.split("@")[0]}</strong><small>{session.user.role}</small></div></div><button className="logout-button" onClick={onLogout} title="Sign out"><LogOut size={17} /></button></div>
+        <div className="sidebar-bottom"><div className="user-chip"><div className="avatar"><UserRound size={16} /></div><div><strong>{session.user.email.split("@")[0]}</strong><small>{session.user.role}</small></div></div><button className="logout-button" onClick={onLogout} aria-label="Sign out" title="Sign out"><LogOut size={17} /></button></div>
       </aside>
       <main className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "ESCALATION QUEUE" : activeView === "conversations" ? "CONVERSATION HISTORY" : activeView === "analytics" ? "ANALYTICS" : activeView === "ai-draft" ? "AI RESPONSE" : activeView === "agent-assist" ? "AGENT ASSIST" : activeView === "help" ? "HELP CENTER" : activeView === "team" ? "TEAM ACCESS" : activeView === "audit" ? "AUDIT LOG" : isStaff ? "SUPPORT QUEUE" : "Your conversations"}</h1></div><div className="topbar-actions"><span className="live-status"><span /> System healthy</span><button className="icon-button" onClick={loadTickets} title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{isStaff ? "Agent workspace" : "Customer portal"}</p><h1>{activeView === "escalations" ? "ESCALATION QUEUE" : activeView === "conversations" ? "CONVERSATION HISTORY" : activeView === "analytics" ? "ANALYTICS" : activeView === "feedback" ? "CSAT FEEDBACK" : activeView === "llm" ? "LLM USAGE" : activeView === "ai-draft" ? "AI RESPONSE" : activeView === "agent-assist" ? "AGENT ASSIST" : activeView === "help" ? "HELP CENTER" : activeView === "team" ? "TEAM ACCESS" : activeView === "audit" ? "AUDIT LOG" : isStaff ? "SUPPORT QUEUE" : "Your conversations"}</h1></div><div className="topbar-actions"><span className={`live-status ${health}`}><span /> {health === "healthy" ? "System healthy" : health === "down" ? "API unreachable" : health === "degraded" ? "Degraded" : "Checking..."}</span><button className="icon-button" onClick={loadTickets} aria-label="Refresh tickets" title="Refresh tickets"><RefreshCw size={17} /></button></div></header>
         <section className="stats-row"><div><span>{isStaff ? "Open tickets" : "Open"}</span><strong>{tickets.filter((ticket) => ticket.status === "open").length}</strong></div><div><span>{isStaff ? "Needs attention" : "In review"}</span><strong>{tickets.filter((ticket) => ticket.requires_human_review).length}</strong></div><div><span>In progress</span><strong>{tickets.filter((ticket) => ticket.status === "in_progress").length}</strong></div></section>
-        {notice && <div className="notice"><Check size={15} /> {notice}<button onClick={() => setNotice("")}>Dismiss</button></div>}
+        {notice && <div className="notice" role="status"><Check size={15} /> {notice}<button onClick={() => setNotice("")} aria-label="Dismiss">Dismiss</button></div>}
+        {newReplyId && (
+          <div className="notice reply-notice" role="status"><MessageSquare size={15} /> New reply on thread #{newReplyId.slice(0, 8)}<button onClick={openNewReply}>View</button><button onClick={() => setNewReplyId(null)} aria-label="Dismiss">Dismiss</button></div>
+        )}
         {activeView === "analytics" && session.user.role === "admin" ? (
           <AnalyticsView session={session} />
+        ) : activeView === "feedback" && session.user.role === "admin" ? (
+          <FeedbackDrillDown session={session} />
+        ) : activeView === "llm" && session.user.role === "admin" ? (
+          <LlmUsageView session={session} />
         ) : activeView === "team" && session.user.role === "admin" ? (
           <AdminTeamPanel session={session} />
         ) : activeView === "audit" && session.user.role === "admin" ? (
@@ -1134,12 +1456,12 @@ return (
           <section className="desk-grid">
             <div className="ticket-column">
               <div className="toolbar"><div className="search-box"><Search size={16} /><input placeholder="Search tickets" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="pending">Pending</option><option value="resolved">Resolved</option></select><select value={slaMode} onChange={(event) => setSlaMode(event.target.value)}><option value="">All deadlines</option><option value="overdue">Overdue only</option><option value="soon">Due within 24h</option><option value="urgency">SLA urgency</option></select>{isStaff && <select value={assigneeFilter} onChange={(event) => setAssigneeFilter(event.target.value)}><option value="">All assignees</option><option value="mine">Assigned to me</option><option value="unassigned">Unassigned</option></select>}</div>
-              <div className="ticket-list">{loading ? <div className="empty-state">Loading queue...</div> : visibleTickets.length ? shownTickets.map((ticket) => { const sla = slaStatus(ticket); return <button className={`ticket-row ${ticket.id === selectedId ? "selected" : ""} ${isTicketSlaOverdue(ticket) ? "overdue" : ""}`} key={ticket.id} onClick={() => setSelectedId(ticket.id)}><div className="ticket-row-top"><span className={`status-dot ${ticket.status}`} /> <strong>{ticket.intent.replace("_", " ")}</strong>{isStaff && ticket.guardrail_status === "flagged" && <span className="guardrail-badge"><ShieldAlert size={12} /> flagged</span>}<span className={`priority ${ticket.priority}`}>{ticket.priority}</span></div><p>{ticket.message}</p><div className="ticket-row-meta">{(isStaff ? <span className={`sla-chip ${sla.class}`} title={ticket.sla_due_at ? `SLA due ${formatDate(ticket.sla_due_at)}` : "No SLA deadline"}><Clock size={12} /> {sla.label}</span> : ticket.sla_due_at ? <span className={`sla-chip ${sla.class}`} title={`We aim to reply by ${formatDate(ticket.sla_due_at)}`}><Clock size={12} /> Reply by {formatDate(ticket.sla_due_at)}</span> : null)}{isStaff && ticket.assignee_id && <span className="assignee-chip" title="Assigned agent">@ {staffName(ticket.assignee_id) || ticket.assignee_id.slice(0, 6)}</span>}<small>{isStaff ? `${ticket.customer_id} · ` : ""}{new Date(ticket.created_at).toLocaleDateString()}</small></div></button>; }) : <div className="empty-state"><Inbox size={28} /><strong>{activeView === "conversations" ? "No past conversations" : "No tickets here"}</strong><span>{activeView === "conversations" ? "Resolved and closed tickets will appear here." : "New conversations will appear in this queue."}</span></div>}{visibleTickets.length > 10 && <button className="show-more" onClick={() => setExpandTickets((value) => !value)}>{expandTickets ? "Show fewer" : `Show all ${visibleTickets.length} tickets`}</button>}</div>
-              {!isStaff && <form className="new-ticket" onSubmit={createTicket}><label>How can we help?<textarea value={newMessage} onChange={(event) => setNewMessage(event.target.value)} placeholder="Tell us what happened..." rows="3" required /></label><div className="topic-chips"><span>Quick topics</span>{Object.entries(TOPIC_PRESETS).map(([key, example]) => <button type="button" key={key} className={topic === key ? "active" : ""} onClick={() => { setTopic(key); setNewMessage(example); }}>{key}</button>)}{topic && <button type="button" className="clear-topic" onClick={() => { setTopic(""); }}>Clear topic</button>}</div><div className="new-ticket-actions"><button className="secondary-button" type="submit"><Plus size={16} /> Submit ticket</button><button type="button" className="help-link" onClick={() => setActiveView("help")}><BookOpen size={15} /> Search help center first</button></div></form>}
+              <div className="ticket-list">{loading ? <div className="empty-state">Loading queue...</div> : visibleTickets.length ? shownTickets.map((ticket) => { const sla = slaStatus(ticket); return <button className={`ticket-row ${ticket.id === selectedId ? "selected" : ""} ${isTicketSlaOverdue(ticket) ? "overdue" : ""}`} key={ticket.id} onClick={() => selectTicket(ticket)}><div className="ticket-row-top"><span className={`status-dot ${ticket.status}`} /> <strong>{ticket.intent.replace("_", " ")}</strong>{isStaff && ticket.guardrail_status === "flagged" && <span className="guardrail-badge"><ShieldAlert size={12} /> flagged</span>}<span className={`priority ${ticket.priority}`}>{ticket.priority}</span></div><p>{ticket.message}</p><div className="ticket-row-meta"><span className={`channel-badge ${ticket.channel || "other"}`}>{channelMeta(ticket.channel).icon} {channelMeta(ticket.channel).label}</span>{!isStaff && unseen[ticket.id] && <span className="reply-badge"><MessageSquare size={11} /> New reply</span>}<span className="thread-id">#{ticket.id.slice(0, 8)}</span>{(isStaff ? <span className={`sla-chip ${sla.class}`} title={ticket.sla_due_at ? `SLA due ${formatDate(ticket.sla_due_at)}` : "No SLA deadline"}><Clock size={12} /> {sla.label}</span> : ticket.sla_due_at ? <span className={`sla-chip ${sla.class}`} title={`We aim to reply by ${formatDate(ticket.sla_due_at)}`}><Clock size={12} /> Reply by {formatDate(ticket.sla_due_at)}</span> : null)}{isStaff && ticket.assignee_id && <span className="assignee-chip" title="Assigned agent">@ {staffName(ticket.assignee_id) || ticket.assignee_id.slice(0, 6)}</span>}<small>{isStaff ? `${ticket.customer_id}` : ""}<span className="meta-sep">·</span>{new Date(ticket.created_at).toLocaleDateString()}</small></div></button>; }) : <div className="empty-state"><Inbox size={28} /><strong>{activeView === "conversations" ? "No past conversations" : "No tickets here"}</strong><span>{activeView === "conversations" ? "Resolved and closed tickets will appear here." : "New conversations will appear in this queue."}</span></div>}{visibleTickets.length > 10 && <button className="show-more" onClick={() => setExpandTickets((value) => !value)}>{expandTickets ? "Show fewer" : `Show all ${visibleTickets.length} tickets`}</button>}</div>
+              {!isStaff && <form className="new-ticket" onSubmit={createTicket}><label>How can we help?<textarea value={newMessage} onChange={(event) => setNewMessage(event.target.value)} placeholder="Tell us what happened..." rows="3" required /></label><label className="file-field"><Paperclip size={15} /><span>Attach files{newTicketFiles.length ? ` (${newTicketFiles.length})` : ""}</span><input type="file" multiple onChange={(event) => setNewTicketFiles([...event.target.files])} /></label><div className="topic-chips"><span>Quick topics</span>{Object.entries(TOPIC_PRESETS).map(([key, example]) => <button type="button" key={key} className={topic === key ? "active" : ""} onClick={() => { setTopic(key); setNewMessage(example); }}>{key}</button>)}{topic && <button type="button" className="clear-topic" onClick={() => { setTopic(""); }}>Clear topic</button>}</div><div className="new-ticket-actions"><button className="secondary-button" type="submit"><Plus size={16} /> Submit ticket</button><button type="button" className="help-link" onClick={() => setActiveView("help")}><BookOpen size={15} /> Search help center first</button></div></form>}
             </div>
             <div className="detail-column">{selectedTicket ? (
           <>
-            <div className="detail-header"><div><span className="detail-kicker">Ticket {selectedTicket.id.slice(0, 8)}</span><h2>{selectedTicket.message}</h2><p className="muted">Created {new Date(selectedTicket.created_at).toLocaleString()} · {selectedTicket.channel}</p></div><div className="detail-header-actions"><span className={`priority large ${selectedTicket.priority}`}>{selectedTicket.priority}</span>{isStaff && <button className="trash-button" onClick={deleteTicket} title="Delete ticket"><Trash2 size={16} /></button>}</div></div>
+            <div className="detail-header"><div><span className="detail-kicker">Thread #{selectedTicket.id.slice(0, 8)}</span><h2>{selectedTicket.message}</h2><p className="muted">Created {new Date(selectedTicket.created_at).toLocaleString()} · <span className={`channel-badge ${selectedTicket.channel || "other"}`}>{channelMeta(selectedTicket.channel).icon} {channelMeta(selectedTicket.channel).label}</span></p></div><div className="detail-header-actions"><span className={`priority large ${selectedTicket.priority}`}>{selectedTicket.priority}</span>{isStaff && <button className="trash-button" onClick={deleteTicket} aria-label="Delete ticket" title="Delete ticket"><Trash2 size={16} /></button>}</div></div>
             {isStaff ? (
               <div className="detail-meta"><div><span>Intent</span><strong>{selectedTicket.intent.replace("_", " ")}</strong></div><div><span>Customer</span><strong>{selectedTicket.customer_id}</strong></div><div><span>Assignee</span><strong>{staff.length ? <select className="assignee-select" value={selectedTicket.assignee_id || ""} onChange={(event) => assignTicket(event.target.value || null)} aria-label="Assign ticket"><option value="">Unassigned</option>{staff.map((user) => <option key={user.id} value={user.id}>{user.email.split("@")[0]}</option>)}</select> : (staffName(selectedTicket.assignee_id) || selectedTicket.assignee_id || "Unassigned")}</strong></div><div><span>Review</span><strong>{selectedTicket.requires_human_review ? "Human review" : "Automated"}</strong></div><div><span>Guardrail</span><strong>{selectedTicket.guardrail_status === "flagged" ? `Flagged (${selectedTicket.guardrail_hits?.length || 0})` : "Clean"}</strong></div></div>
             ) : (
@@ -1150,6 +1472,7 @@ return (
                   <div><span>Channel</span><strong>{selectedTicket.channel}</strong></div>
                 </div>
                 <div className="customer-progress">
+                  <div className="progress-item done"><CheckCircle2 size={14} /><span>Received</span><strong>{new Date(selectedTicket.created_at).toLocaleString()}</strong></div>
                   <div className="progress-item"><Clock size={14} /><span>First response</span><strong>{selectedTicket.first_response_at ? new Date(selectedTicket.first_response_at).toLocaleString() : "Waiting for first reply"}</strong></div>
                   <div className="progress-item"><Timer size={14} /><span>We aim to reply by</span><strong>{selectedTicket.sla_due_at ? new Date(selectedTicket.sla_due_at).toLocaleString() : "Not set"}</strong></div>
                   {selectedTicket.requires_human_review && <div className="progress-item human"><ShieldAlert size={14} /><span>Review</span><strong>A support specialist is reviewing your issue</strong></div>}
@@ -1170,7 +1493,8 @@ return (
               </div>
             )}
             {isStaff && <div className="status-actions"><span>Move ticket</span>{["open", "in_progress", "pending", "resolved", "closed"].map((status) => <button className={selectedTicket.status === status ? "active" : ""} key={status} onClick={() => updateTicket(status)}>{status.replace("_", " ")}</button>)}</div>}
-            <div className="conversation"><div className="conversation-heading"><h3>Conversation</h3><span>{comments.length} messages</span></div>{comments.length ? comments.map((item) => <article className={`message ${item.is_internal ? "internal" : ""} ${item.author_id === "ai-assistant" ? "ai" : ""}`} key={item.id}><div className="message-avatar"><Sparkles size={15} /></div><div><div className="message-meta"><strong>{item.author_id === session.user.id ? "You" : item.author_id === "ai-assistant" ? "Relay AI" : item.author_id}</strong>{item.author_id === "ai-assistant" && <span className="ai-tag">AI</span>}{item.is_internal && <span>Internal note</span>}<time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></div></article>) : <div className="empty-conversation">No messages yet.</div>}{isStaff || !["resolved", "closed"].includes(selectedTicket.status) ? <form className="comment-form" onSubmit={addComment}>{isStaff && <div className="comment-visibility" role="group" aria-label="Comment visibility"><button type="button" className={!isInternal ? "active" : ""} onClick={() => setIsInternal(false)}><Send size={13} /> Reply to customer</button><button type="button" className={isInternal ? "active" : ""} onClick={() => setIsInternal(true)}><Lock size={13} /> Internal note</button></div>}<textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isStaff ? (isInternal ? "Write an internal note..." : "Write a customer-facing reply...") : "Write a reply..."} rows="3" /><button className="primary-button">{!isStaff || isInternal ? "Send" : "Send reply"} <ArrowRight size={16} /></button></form> : <div className="resolved-note"><CheckCircle2 size={14} /> This conversation is resolved. Open a new one from the left for anything else.</div>}</div>
+            {attachments.length ? <div className="conversation attach-list"><div className="conversation-heading"><h3>Attachments</h3><span>{attachments.length} file{attachments.length > 1 ? "s" : ""}</span></div>{attachments.map((attachment) => <div className="attachment-row" key={attachment.id}><Paperclip size={14} /><span className="attachment-name" title={attachment.filename}>{attachment.filename}</span><small>{attachment.size > 1048576 ? `${(attachment.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(attachment.size / 1024))} KB`}</small><button type="button" className="attachment-download" onClick={() => downloadAttachment(attachment)} aria-label={`Download ${attachment.filename}`}><Download size={14} /></button></div>)}</div> : null}
+            <div className="conversation"><div className="conversation-heading"><h3>Conversation</h3><span>{comments.length} messages</span></div>{comments.length ? comments.map((item) => <article className={`message ${item.is_internal ? "internal" : ""} ${item.author_id === "ai-assistant" ? "ai" : ""}`} key={item.id}><div className="message-avatar"><Sparkles size={15} /></div><div><div className="message-meta"><strong>{item.author_id === session.user.id ? "You" : item.author_id === "ai-assistant" ? "Relay AI" : item.author_id}</strong>{item.author_id === "ai-assistant" && <span className="ai-tag">AI</span>}{item.is_internal && <span>Internal note</span>}<time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></div></article>) : <div className="empty-conversation">No messages yet.</div>}{isStaff || !["resolved", "closed"].includes(selectedTicket.status) ? <form className="comment-form" onSubmit={addComment}>{isStaff && <div className="comment-visibility" role="group" aria-label="Comment visibility"><button type="button" className={!isInternal ? "active" : ""} onClick={() => setIsInternal(false)}><Send size={13} /> Reply to customer</button><button type="button" className={isInternal ? "active" : ""} onClick={() => setIsInternal(true)}><Lock size={13} /> Internal note</button></div>}<textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isStaff ? (isInternal ? "Write an internal note..." : "Write a customer-facing reply...") : "Write a reply..."} rows="3" /><label className="file-field"><Paperclip size={15} /><span>Attach{newFiles.length ? ` (${newFiles.length})` : " files"}</span><input type="file" multiple onChange={(event) => setNewFiles([...event.target.files])} disabled={uploading} /></label><button className="primary-button">{uploading ? "Uploading..." : !isStaff || isInternal ? "Send" : "Send reply"} <ArrowRight size={16} /></button></form> : <div className="resolved-note"><CheckCircle2 size={14} /> This conversation is resolved. Open a new one from the left for anything else.</div>}</div>
             {!isStaff && (selectedTicket.status === "resolved" || selectedTicket.status === "closed") && (
               <div className="feedback-panel">
                 <h4><Star size={15} /> How did we do?</h4>
@@ -1187,6 +1511,7 @@ return (
         )}</div>
           </section>
         )}
+        <ConfirmDialog open={confirmDelete} title="Delete ticket" message={`Delete ${selectedTicket ? `ticket ${selectedTicket.id.slice(0, 8)}` : "this ticket"} and all its messages? This cannot be undone.`} confirmLabel="Delete" danger onConfirm={confirmDeleteTicket} onClose={() => setConfirmDelete(false)} />
       </main>
     </div>
   );

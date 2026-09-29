@@ -20,6 +20,7 @@ from app.api.schemas import (
     EscalationAnalytics,
     EscalationStatus,
     FeedbackAnalytics,
+    FeedbackDetail,
     LlmUsageSummary,
     SlaBreakdown,
     SlaMetrics,
@@ -200,6 +201,40 @@ def feedback_analytics(
             else None
         ),
     )
+
+
+@router.get("/admin/analytics/feedback-details", response_model=list[FeedbackDetail])
+def feedback_details(
+    _: UserRecord = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[FeedbackDetail]:
+    """Per-ticket CSAT records for the admin drill-down, newest first."""
+    feedback_records = db.scalars(
+        select(FeedbackRecord).order_by(FeedbackRecord.created_at.desc()).limit(200)
+    ).all()
+    ticket_ids = {record.ticket_id for record in feedback_records}
+    tickets: dict[str, TicketRecord] = {}
+    if ticket_ids:
+        tickets = {
+            record.id: record
+            for record in db.scalars(
+                select(TicketRecord).where(TicketRecord.id.in_(ticket_ids))
+            ).all()
+        }
+    return [
+        FeedbackDetail(
+            id=feedback.id,
+            ticket_id=feedback.ticket_id,
+            message=tickets[feedback.ticket_id].message if feedback.ticket_id in tickets else None,
+            customer_id=(
+                tickets[feedback.ticket_id].customer_id if feedback.ticket_id in tickets else None
+            ),
+            rating=feedback.rating,
+            comment=feedback.comment,
+            created_at=feedback.created_at,
+        )
+        for feedback in feedback_records
+    ]
 
 
 @router.get("/admin/analytics/dashboard", response_model=DashboardAnalytics)

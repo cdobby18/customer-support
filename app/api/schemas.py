@@ -66,6 +66,16 @@ class TicketComment(CommentCreate):
     created_at: datetime
 
 
+class TicketAttachment(BaseModel):
+    id: UUID
+    ticket_id: UUID
+    filename: str
+    content_type: str | None = None
+    size: int
+    uploaded_by: str | None = None
+    created_at: datetime
+
+
 class Ticket(TicketCreate):
     id: UUID
     intent: str
@@ -95,6 +105,9 @@ class Ticket(TicketCreate):
     guardrail_hits: list[dict] | None = None
     external_id: str | None = None
     thread_id: str | None = None
+    message_count: int = 0
+    last_message_at: datetime | None = None
+    last_message_external: bool = False
 
 
 class RegisterRequest(BaseModel):
@@ -159,6 +172,16 @@ class FeedbackAnalytics(BaseModel):
     rating_distribution: dict[int, int]
     response_rate: float | None
     deflection_rate: float | None
+
+
+class FeedbackDetail(BaseModel):
+    id: str
+    ticket_id: str
+    message: str | None = None
+    customer_id: str | None = None
+    rating: int
+    comment: str | None = None
+    created_at: datetime
 
 
 class SlaBreakdown(BaseModel):
@@ -282,7 +305,14 @@ def redact_guardrail_hits(hits: list[dict] | None) -> list[dict] | None:
     ]
 
 
-def to_ticket(record: TicketRecord, *, staff_view: bool = True) -> Ticket:
+def to_ticket(
+    record: TicketRecord,
+    *,
+    staff_view: bool = True,
+    message_count: int = 0,
+    last_message_at: datetime | None = None,
+    last_message_external: bool = False,
+) -> Ticket:
     """Serialize a ticket. `staff_view=False` is the customer projection: risk
     scoring, the reviewer summary and raw intake metadata are internal, and
     guardrail hits lose the matched value."""
@@ -322,6 +352,9 @@ def to_ticket(record: TicketRecord, *, staff_view: bool = True) -> Ticket:
         ),
         external_id=record.external_id,
         thread_id=record.thread_id,
+        message_count=message_count,
+        last_message_at=last_message_at,
+        last_message_external=last_message_external,
     )
 
 

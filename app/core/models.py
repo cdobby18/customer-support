@@ -94,6 +94,19 @@ class FeedbackRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class TicketAttachmentRecord(Base):
+    __tablename__ = "ticket_attachments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    ticket_id: Mapped[str] = mapped_column(String(36), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    storage_path: Mapped[str] = mapped_column(String(512))
+    uploaded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class RevokedTokenRecord(Base):
     """One row per access token that has been revoked. The primary key is the
     token's `jti`; rows are only needed until the token's own `exp` passes."""
