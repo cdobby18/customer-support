@@ -262,6 +262,10 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class LogoutResponse(BaseModel):
+    revoked: bool
+
+
 def to_ticket(record: TicketRecord) -> Ticket:
     return Ticket(
         id=UUID(record.id),

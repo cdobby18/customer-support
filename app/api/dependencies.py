@@ -7,23 +7,31 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.models import UserRecord, UserRole
-from app.security.auth import decode_access_token
+from app.security.auth import TokenClaims, decode_access_token
+from app.security.sessions import is_token_revoked
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def get_current_user(
+def read_token_claims(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    db: Session = Depends(get_db),
-) -> UserRecord:
+) -> TokenClaims:
+    """Verify the bearer token's signature and shape, without touching the DB."""
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Authentication required")
     try:
-        user_id = decode_access_token(credentials.credentials)
+        return decode_access_token(credentials.credentials)
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid or expired token") from None
 
-    user = db.get(UserRecord, user_id)
+
+def get_current_user(
+    claims: TokenClaims = Depends(read_token_claims),
+    db: Session = Depends(get_db),
+) -> UserRecord:
+    if is_token_revoked(db, claims.session_id):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+    user = db.get(UserRecord, claims.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user

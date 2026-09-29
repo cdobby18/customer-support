@@ -60,3 +60,21 @@ def validate_security_configuration() -> None:
         raise RuntimeError(
             "OPENAI_API_KEY must be configured when EMBEDDING_PROVIDER=openai in production"
         )
+    login_attempts = _integer_env("AUTH_LOGIN_MAX_ATTEMPTS", 5)
+    if login_attempts < 1:
+        raise RuntimeError(
+            "AUTH_LOGIN_MAX_ATTEMPTS must be at least 1 in production; "
+            "0 or less disables login brute-force throttling"
+        )
+    if _integer_env("AUTH_LOGIN_LOCKOUT_SECONDS", 300) < 1:
+        raise RuntimeError("AUTH_LOGIN_LOCKOUT_SECONDS must be at least 1 in production")
+
+
+def _integer_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        raise RuntimeError(f"{name} must be an integer, got {raw_value!r}") from None

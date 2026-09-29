@@ -1,61 +1,28 @@
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
 from app.agents.knowledge import MIN_MATCH_SCORE, KnowledgeMatch, search_knowledge
 from app.agents.triage import TriageIntent, TriagePriority, TriageSentiment, classify_ticket
 from app.api.routers.webhooks import _rate_limiter_memory
 from app.core.config_validation import validate_security_configuration
-from app.core.database import Base, get_db
 from app.core.models import AuditLogRecord, UserRecord, UserRole
 from app.security.auth import create_access_token
-from app.main import app
-
-
-test_engine = create_engine(
-    "sqlite://",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
+from harness import ADMIN_ID, client, drop_schema, reset_schema, seed_admin, test_engine
 
 
 @pytest.fixture(autouse=True)
 def reset_database():
-    Base.metadata.drop_all(bind=test_engine)
-    Base.metadata.create_all(bind=test_engine)
-    with Session(test_engine) as session:
-        session.add(
-            UserRecord(
-                id="00000000-0000-0000-0000-000000000001",
-                email="admin@example.com",
-                password_hash="unused",
-                role=UserRole.admin.value,
-                is_active=True,
-                created_at=datetime(2026, 9, 23, tzinfo=timezone.utc),
-            )
-        )
-        session.commit()
+    reset_schema()
+    seed_admin()
     yield
-    Base.metadata.drop_all(bind=test_engine)
-
-
-def override_get_db():
-    with Session(test_engine) as session:
-        yield session
-
-
-app.dependency_overrides[get_db] = override_get_db
-client = TestClient(app)
+    drop_schema()
 
 
 def admin_headers() -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {create_access_token('00000000-0000-0000-0000-000000000001')}"
-    }
+    return {"Authorization": f"Bearer {create_access_token(ADMIN_ID)}"}
 
 
 def test_health_check() -> None:

@@ -1200,11 +1200,16 @@ export default function App() {
   const [banner, setBanner] = useState("");
   const handleAuthenticated = (nextSession) => { localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession)); setBanner(""); setSession(nextSession); };
   const logout = () => { localStorage.removeItem(SESSION_KEY); setSession(null); };
+  const logoutAndRevoke = () => {
+    const current = readStoredSession();
+    logout();
+    if (current) apiRequest("/auth/logout", { method: "POST" }, current.access_token).catch(() => {});
+  };
   useEffect(() => {
     setSessionExpiredHandler(() => { setBanner("Your session expired. Please sign in again."); logout(); });
     return () => setSessionExpiredHandler(null);
   }, []);
-  return session ? <AppShell session={session} onLogout={logout} /> : <AuthScreen onAuthenticated={handleAuthenticated} banner={banner} />;
+  return session ? <AppShell session={session} onLogout={logoutAndRevoke} /> : <AuthScreen onAuthenticated={handleAuthenticated} banner={banner} />;
 }
 
 

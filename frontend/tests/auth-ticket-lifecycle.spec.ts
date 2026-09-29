@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const API_URL = 'http://localhost:8000';
+const API_URL = process.env.API_URL ?? 'http://localhost:8000';
 
 async function createUserViaAPI(email: string, password: string) {
   const response = await fetch(`${API_URL}/auth/register`, {
@@ -73,8 +73,17 @@ test.describe('Auth + Ticket Lifecycle', () => {
     await expect(page.locator('text=This is a test comment from E2E test')).toBeVisible();
 
     // 5. Logout
+    const uiToken = JSON.parse(
+      await page.evaluate(() => localStorage.getItem('relay-session') ?? '{}')
+    ).access_token;
     await page.click('button[title="Sign out"]');
     await expect(page.locator('text=Welcome back')).toBeVisible();
+
+    // 6. Signing out revokes the token server-side, not just locally
+    const revokedCheck = await fetch(`${API_URL}/auth/me`, {
+      headers: { 'Authorization': `Bearer ${uiToken}` },
+    });
+    expect(revokedCheck.status).toBe(401);
   });
 
   test('Customer cannot access other customer tickets', async ({ page }) => {

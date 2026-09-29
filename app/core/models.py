@@ -31,7 +31,7 @@ class AuditLogRecord(Base):
     actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String(100), index=True)
     entity_type: Mapped[str] = mapped_column(String(50), index=True)
-    entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    entity_id: Mapped[str] = mapped_column(String(255), index=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
@@ -92,3 +92,15 @@ class FeedbackRecord(Base):
     rating: Mapped[int] = mapped_column(Integer)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class RevokedTokenRecord(Base):
+    """One row per access token that has been revoked. The primary key is the
+    token's `jti`; rows are only needed until the token's own `exp` passes."""
+
+    __tablename__ = "revoked_tokens"
+
+    session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

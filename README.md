@@ -146,7 +146,11 @@ $env:AUTO_RESPOND_ENABLED="true"
 ```
 
 Set `JWT_EXPIRE_MINUTES` to lengthen the session; it defaults to `60`.
-See `.env.example` for the full set of variables.
+Failed logins are throttled per email and client IP: after
+`AUTH_LOGIN_MAX_ATTEMPTS` (default `5`) in `AUTH_LOGIN_LOCKOUT_SECONDS`
+(default `300`) the pair is refused with `429` and a `Retry-After` header.
+Signing out calls `POST /auth/logout`, which revokes that access token
+server-side. See `.env.example` for the full set of variables.
 
 ## Success Metrics
 
