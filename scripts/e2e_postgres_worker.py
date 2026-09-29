@@ -35,6 +35,12 @@ import time
 import urllib.error
 import urllib.request
 
+# When run as `python scripts/e2e_postgres_worker.py`, sys.path[0] is
+# scripts/, not the repo root, so `app` is not importable. Put the repo root
+# on the path explicitly (harmless if it is already there, including when this
+# module is loaded through importlib by tests).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 API = "http://127.0.0.1:8000"
 RECEIVER = "http://127.0.0.1:8099"
 WORKER_LOG = "/tmp/worker.log"
