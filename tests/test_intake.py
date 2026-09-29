@@ -650,8 +650,13 @@ def test_enrichment_counts_tickets_and_finds_the_newest() -> None:
     assert context.total_tickets_count == 3
     assert context.open_tickets_count == 2
     # SQLite does not preserve the offset on a DateTime(timezone=True) column,
-    # so the value comes back naive here. Compare instants, not tzinfo.
-    assert context.last_contact_at == datetime(2026, 9, 1, 0, 2)
+    # so the value comes back naive there while PostgreSQL returns it aware.
+    # Compare instants, not tzinfo.
+    last_contact = context.last_contact_at
+    assert last_contact is not None
+    if last_contact.tzinfo is None:
+        last_contact = last_contact.replace(tzinfo=timezone.utc)
+    assert last_contact == datetime(2026, 9, 1, 0, 2, tzinfo=timezone.utc)
     assert context.tier == "standard"
     assert context.tags == []
 

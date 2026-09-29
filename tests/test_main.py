@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.knowledge import MIN_MATCH_SCORE, KnowledgeMatch, search_knowledge
 from app.agents.triage import TriageIntent, TriagePriority, TriageSentiment, classify_ticket
+from app.api.routers import webhooks as webhooks
 from app.api.routers.webhooks import _rate_limiter_memory
 from app.core.config_validation import validate_security_configuration
 from app.core.models import AuditLogRecord, UserRecord, UserRole
@@ -694,6 +695,14 @@ def test_production_accepts_configured_security_secrets(monkeypatch: pytest.Monk
 
 def test_webhook_rate_limit_rejects_excess_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WEBHOOK_RATE_LIMIT_PER_MINUTE", "1")
+    # The limiter falls back to an in-memory store only when Redis is
+    # unreachable. With a real Redis reachable, every webhook test in the suite
+    # shares the same 60-second window, so a request made here is already inside
+    # a window another test consumed and the first post would be 429. This test
+    # is about the ceiling logic, not Redis persistence, so force the memory
+    # path and clear it regardless of where the suite runs.
+    monkeypatch.setattr(webhooks, "_rate_limiter_redis", None)
+    monkeypatch.setattr(webhooks, "_get_redis", lambda: None)
     _rate_limiter_memory.clear()
     response = client.post(
         "/webhooks/email",
