@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user, read_token_claims
+from app.api.dependencies import get_current_user, read_token_claims, require_staff
 from app.api.schemas import (
     LoginRequest,
     LoginResponse,
@@ -127,3 +127,20 @@ def logout_user(
 @router.get("/auth/me", response_model=UserResponse)
 def get_authenticated_user(current_user: UserRecord = Depends(get_current_user)) -> UserResponse:
     return to_user(current_user)
+
+
+@router.get("/users/staff", response_model=list[UserResponse])
+def list_staff_assignees(
+    _: UserRecord = Depends(require_staff),
+    db: Session = Depends(get_db),
+) -> list[UserResponse]:
+    """Roster of assignable staff (agents and admins) for anyone working the queue."""
+    query = (
+        select(UserRecord)
+        .where(
+            UserRecord.role.in_([UserRole.agent.value, UserRole.admin.value]),
+            UserRecord.is_active.is_(True),
+        )
+        .order_by(UserRecord.created_at)
+    )
+    return [to_user(record) for record in db.scalars(query).all()]

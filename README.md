@@ -126,7 +126,7 @@ Run the backend tests from another terminal:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Expected current result: `309 passed`.
+Expected current result: `312 passed`.
 
 For an end-to-end API smoke test while the API is running:
 

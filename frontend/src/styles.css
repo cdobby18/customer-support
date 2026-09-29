@@ -239,3 +239,9 @@
 
 @media (max-width: 900px) { .customer-meta { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 560px) { .help-panel { padding: 24px 18px; }.help-cta { flex-wrap: wrap; }.help-cta .primary-button { margin-left: 0; }.customer-progress, .feedback-panel { padding-inline: 17px; }.feedback-panel .primary-button { width: auto; } }
+
+.assignee-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 700; color: var(--teal); background: var(--mint); padding: 3px 8px; border-radius: 999px; }
+.assignee-select { font-size: 11px; padding: 3px 6px; border: 1px solid var(--line); background: #fff; color: var(--ink); text-transform: none; border-radius: 2px; }
+.comment-visibility { display: flex; gap: 6px; margin-bottom: 10px; }
+.comment-visibility button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: #fff; padding: 6px 10px; color: var(--muted); font-size: 11px; font-weight: 700; border-radius: 2px; cursor: pointer; }
+.comment-visibility button.active { background: var(--teal); color: #fff; border-color: var(--teal); }

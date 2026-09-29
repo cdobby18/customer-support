@@ -446,3 +446,40 @@ def test_customer_cannot_reach_admin_routes_but_may_search_knowledge() -> None:
 
 def test_knowledge_search_requires_authentication() -> None:
     assert client.get("/knowledge/search", params={"query": "refund"}).status_code == 401
+
+
+# --- staff roster boundary --------------------------------------------------
+
+
+def test_staff_roster_is_visible_to_every_staff_role() -> None:
+    make_user("sally@example.com", "agent")
+    make_user("john@example.com", "admin")
+    make_user("bob@example.com", "customer")
+
+    response = client.get("/users/staff", headers=login("sally@example.com"))
+
+    assert response.status_code == 200
+    emails = [user["email"] for user in response.json()]
+    assert "sally@example.com" in emails
+    assert "john@example.com" in emails
+    assert "bob@example.com" not in emails
+
+
+def test_staff_roster_excludes_inactive_members() -> None:
+    make_user("active@example.com", "agent")
+    make_user("gone@example.com", "agent")
+    with Session(test_engine) as session:
+        record = session.scalar(select(UserRecord).where(UserRecord.email == "gone@example.com"))
+        record.is_active = False
+        session.commit()
+
+    response = client.get("/users/staff", headers=login("active@example.com"))
+
+    assert response.status_code == 200
+    assert all(user["email"] != "gone@example.com" for user in response.json())
+
+
+def test_staff_roster_requires_staff_or_admin() -> None:
+    customer = make_user("plain@example.com", "customer")
+    assert client.get("/users/staff", headers=login(customer.email)).status_code == 403
+    assert client.get("/users/staff").status_code == 401
