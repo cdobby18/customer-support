@@ -103,27 +103,26 @@ jobs:
           fi
 
       - name: Migrations apply to an empty database
-        # A named volume, not two containers each with their own /tmp: the
-        # ephemeral filesystem is discarded with the container, so the original
-        # version of this step checked an empty database twice and could not
-        # have failed. A volume is also what a real deploy has.
+        # Both commands in ONE container, on purpose. Two `docker run --rm`
+        # invocations were the first version, but --rm discards the container's
+        # filesystem, so the second command inspected a database that no longer
+        # existed and could not fail. A named volume fixed the persistence and
+        # then failed differently: Docker creates volumes owned by root, and
+        # this image runs as uid 10001, so SQLite could not create its file.
+        # /tmp is world-writable, which is the right place for a throwaway
+        # check - and the real deploy target is PostgreSQL, not a SQLite file on
+        # a volume, so the volume was modelling a situation that does not occur.
         run: |
-          docker volume create support-migrate
-          docker run --rm \
-            --volume support-migrate:/state \
-            -e DATABASE_URL=sqlite:////state/migrate.db \
-            support-api:${{ github.sha }} alembic upgrade head
           current="$(docker run --rm \
-            --volume support-migrate:/state \
-            -e DATABASE_URL=sqlite:////state/migrate.db \
-            support-api:${{ github.sha }} alembic current 2>&1)"
+            -e DATABASE_URL=sqlite:////tmp/migrate.db \
+            support-api:${{ github.sha }} \
+            sh -c 'alembic upgrade head && alembic current' 2>&1)"
           echo "$current"
-          docker volume rm support-migrate
           # `alembic current` exits 0 and prints no revision at all when the
           # database has never been migrated, so the exit code proves nothing.
-          # "(head)" is the part that distinguishes an upgraded database from an
-          # empty one, and it tracks new migrations automatically instead of
-          # hardcoding a revision id that would rot on the next one.
+          # "(head)" is the part that separates an upgraded database from an
+          # empty one, and it tracks new migrations instead of hardcoding a
+          # revision id that would rot on the next one.
           if ! grep -q "(head)" <<<"$current"; then
             echo "::error::database is not at the alembic head"
             exit 1

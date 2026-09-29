@@ -232,7 +232,10 @@ Three details that are deliberate rather than incidental:
 - **`--pool=solo`.** The worker imports the same modules as the API, so Celery's
   default prefork pool would copy a multi-gigabyte torch process per child.
 - **Non-root.** The container runs as uid 10001; it holds the database
-  credentials and the webhook secret, so an escape should not land on root.
+  credentials and the webhook secret, so an escape should not land on root. One
+  consequence: Docker creates named volumes as root, so a non-root container
+  cannot write to a fresh one — `docker run -v ...` needs the volume chowned
+  first, or an entrypoint that fixes ownership.
 - **`CELERY_TASK_ALWAYS_EAGER` must be `0`.** It defaults to `1`, which runs tasks
   inline in the API process and makes the worker a no-op.
 
