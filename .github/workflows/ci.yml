@@ -309,16 +309,17 @@ jobs:
     env:
       DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_suite
       REDIS_URL: redis://127.0.0.1:6379/0
-      APP_ENV: development
-      LLM_PROVIDER: mock
-      SUPPORT_TOOL_PROVIDER: mock
-      JWT_SECRET: ci-only-not-a-real-secret
-      CHANNEL_WEBHOOK_SECRET: ci-only-not-a-real-secret
-      # TRUSTED_HOSTS is deliberately absent. Setting it here replaced the app's
-      # default (localhost,127.0.0.1,testserver) and dropped `testserver`, which
-      # is the Host header the test client sends - so all 124 API tests became
-      # 400 "Invalid host header" on the first run of this job. The default
-      # already covers the live API, which is reached over 127.0.0.1.
+      # Only the connection strings belong here. APP_ENV, LLM_PROVIDER,
+      # TRUSTED_HOSTS, JWT_SECRET and CHANNEL_WEBHOOK_SECRET all REPLACE an app
+      # default that the tests depend on, rather than adding to it, and each one
+      # broke the suite in a different way before being removed:
+      #   - TRUSTED_HOSTS dropped `testserver` (the TestClient's Host header):
+      #     124 tests became 400 "Invalid host header"
+      #   - CHANNEL_WEBHOOK_SECRET replaced the "local-webhook-secret" the
+      #     webhook tests authenticate with: they became 401
+      #   - LLM_PROVIDER=mock provisioned the LLM gateway the tests expect to be
+      #     absent: response-draft tests that expect 503 got 200
+      # The suite must run with the same defaults as a developer machine.
 
     steps:
       - uses: actions/checkout@v4
@@ -416,11 +417,21 @@ jobs:
           exit 1
 
       - name: Start the API against PostgreSQL with a real broker
+        # This is the live process, so it is where app config belongs - unlike
+        # the job level, where it replaced defaults the test suite depends on.
         env:
           # Non-eager, explicitly. This project defaults CELERY_TASK_ALWAYS_EAGER
           # to 1, which would run notifications inside the API process and make
           # the worker decorative.
+          DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_deploy
           CELERY_TASK_ALWAYS_EAGER: '0'
+          APP_ENV: development
+          TRUSTED_HOSTS: 127.0.0.1,localhost,testserver
+          LLM_PROVIDER: mock
+          SUPPORT_TOOL_PROVIDER: mock
+          JWT_SECRET: ci-only-not-a-real-secret
+          CHANNEL_WEBHOOK_SECRET: ci-only-not-a-real-secret
+          NOTIFY_WEBHOOK_URL: http://127.0.0.1:8099/hook
         run: |
           nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 \
             > /tmp/api.log 2>&1 &
