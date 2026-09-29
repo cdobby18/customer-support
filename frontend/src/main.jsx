@@ -1200,10 +1200,18 @@ export default function App() {
   const [banner, setBanner] = useState("");
   const handleAuthenticated = (nextSession) => { localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession)); setBanner(""); setSession(nextSession); };
   const logout = () => { localStorage.removeItem(SESSION_KEY); setSession(null); };
-  const logoutAndRevoke = () => {
+  const logoutAndRevoke = async () => {
     const current = readStoredSession();
-    logout();
-    if (current) apiRequest("/auth/logout", { method: "POST" }, current.access_token).catch(() => {});
+    try {
+      // Revoke before the UI reports "signed out". Clearing local state first
+      // leaves a window where the screen says the session is gone while the
+      // token is still live server-side.
+      if (current) await apiRequest("/auth/logout", { method: "POST" }, current.access_token);
+    } catch {
+      // An unreachable API must not strand the user on a screen they cannot leave.
+    } finally {
+      logout();
+    }
   };
   useEffect(() => {
     setSessionExpiredHandler(() => { setBanner("Your session expired. Please sign in again."); logout(); });

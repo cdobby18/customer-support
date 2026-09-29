@@ -23,7 +23,7 @@ from app.agents.support import (
     sla_deadline,
     triage,
 )
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, is_staff, require_staff
 from app.api.schemas import (
     AutoRespondResponse,
     CommentCreate,
@@ -50,17 +50,20 @@ from app.core.models import (
     TicketCommentRecord,
     TicketRecord,
     UserRecord,
-    UserRole,
 )
 from app.core.workers import enqueue_notification
 
 
 def ensure_ticket_access(ticket: TicketRecord, user: UserRecord) -> None:
-    if user.role == UserRole.customer.value and ticket.customer_id != user.id:
+    if not is_staff(user) and ticket.customer_id != user.id:
         raise HTTPException(status_code=403, detail="You do not have access to this ticket")
 
 
 router = APIRouter()
+
+# The only channel a customer may originate; channels are otherwise supplied by
+# the integration that received the message.
+CUSTOMER_CHANNEL = "web"
 
 
 @router.post("/tickets", response_model=Ticket, status_code=status.HTTP_201_CREATED)
@@ -69,8 +72,15 @@ def create_ticket(
     current_user: UserRecord = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Ticket:
-    if current_user.role == UserRole.customer.value and ticket_data.customer_id != current_user.id:
+    if not is_staff(current_user) and ticket_data.customer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Customers can only create their own tickets")
+    if not is_staff(current_user) and ticket_data.channel != CUSTOMER_CHANNEL:
+        # The channel selects the SLA multiplier, so a customer choosing it
+        # would be choosing their own deadline.
+        raise HTTPException(
+            status_code=403,
+            detail=f"Customers can only open tickets on the {CUSTOMER_CHANNEL} channel",
+        )
     triage_result = triage(ticket_data.message)
     guardrail_report = evaluate(ticket_data.message, customer_email=current_user.email)
     now = datetime.now(timezone.utc)
@@ -185,7 +195,7 @@ def create_ticket(
         record,
         sync_ticket_outbound(record, "ticket.created", ticket_payload=_integration_ticket_payload(record)),
     )
-    return to_ticket(record)
+    return to_ticket(record, staff_view=is_staff(current_user))
 
 
 
@@ -193,12 +203,9 @@ def create_ticket(
 def update_escalation(
     ticket_id: UUID,
     escalation_update: EscalationUpdate,
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_staff),
     db: Session = Depends(get_db),
 ) -> Ticket:
-    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
-        raise HTTPException(status_code=403, detail="Support staff access required")
-
     record = db.get(TicketRecord, str(ticket_id))
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -234,14 +241,16 @@ def list_tickets(
     current_user: UserRecord = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Ticket]:
+    staff_view = is_staff(current_user)
     query = select(TicketRecord).order_by(TicketRecord.created_at)
-    if current_user.role == UserRole.customer.value:
+    if not staff_view:
+        # A customer-supplied customer_id filter must not widen the result set.
         customer_id = current_user.id
     if ticket_status is not None:
         query = query.where(TicketRecord.status == ticket_status.value)
     if customer_id is not None:
         query = query.where(TicketRecord.customer_id == customer_id)
-    return [to_ticket(record) for record in db.scalars(query).all()]
+    return [to_ticket(record, staff_view=staff_view) for record in db.scalars(query).all()]
 
 
 
@@ -255,7 +264,7 @@ def get_ticket(
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     ensure_ticket_access(record, current_user)
-    return to_ticket(record)
+    return to_ticket(record, staff_view=is_staff(current_user))
 
 
 
@@ -263,11 +272,9 @@ def get_ticket(
 def update_ticket(
     ticket_id: UUID,
     ticket_update: TicketUpdate,
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_staff),
     db: Session = Depends(get_db),
 ) -> Ticket:
-    if current_user.role == UserRole.customer.value:
-        raise HTTPException(status_code=403, detail="Customers cannot update tickets")
     record = db.get(TicketRecord, str(ticket_id))
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -305,18 +312,16 @@ def update_ticket(
                     record, "ticket.updated", ticket_payload=_integration_ticket_payload(record)
                 ),
         )
-    return to_ticket(record)
+    return to_ticket(record, staff_view=True)
 
 
 
 @router.delete("/tickets/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_ticket(
     ticket_id: UUID,
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_staff),
     db: Session = Depends(get_db),
 ) -> None:
-    if current_user.role == UserRole.customer.value:
-        raise HTTPException(status_code=403, detail="Customers cannot delete tickets")
     record = db.get(TicketRecord, str(ticket_id))
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -362,10 +367,12 @@ def add_comment(
         author_id=current_user.id,
         created_at=datetime.now(timezone.utc),
         body=comment_data.body,
-        is_internal=comment_data.is_internal,
+        # An internal note is staff-only by definition; letting a customer set
+        # the flag would let them write into a space they cannot read.
+        is_internal=comment_data.is_internal and is_staff(current_user),
     )
     if (
-        current_user.role in {UserRole.agent.value, UserRole.admin.value}
+        is_staff(current_user)
         and ticket.first_response_at is None
     ):
         ticket.first_response_at = record.created_at
@@ -416,6 +423,9 @@ def list_comments(
         .where(TicketCommentRecord.ticket_id == str(ticket_id))
         .order_by(TicketCommentRecord.created_at)
     )
+    if not is_staff(current_user):
+        # Internal notes are staff-only. The ticket owner is not staff.
+        query = query.where(TicketCommentRecord.is_internal.is_(False))
     return [to_comment(record) for record in db.scalars(query).all()]
 
 
@@ -474,11 +484,9 @@ def submit_feedback(
 @router.post("/tickets/{ticket_id}/response-draft", response_model=ResponseDraft)
 def draft_ticket_response(
     ticket_id: UUID,
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_staff),
     db: Session = Depends(get_db),
 ) -> ResponseDraft:
-    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
-        raise HTTPException(status_code=403, detail="Support staff access required")
     record = db.get(TicketRecord, str(ticket_id))
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -519,11 +527,9 @@ def draft_ticket_response(
 @router.post("/tickets/{ticket_id}/auto-respond", response_model=AutoRespondResponse)
 def auto_respond_ticket(
     ticket_id: UUID,
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_staff),
     db: Session = Depends(get_db),
 ) -> AutoRespondResponse:
-    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
-        raise HTTPException(status_code=403, detail="Support staff access required")
     record = db.get(TicketRecord, str(ticket_id))
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -535,11 +541,9 @@ def auto_respond_ticket(
 def decide_draft(
     ticket_id: UUID,
     decision_data: DraftDecisionRequest,
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_staff),
     db: Session = Depends(get_db),
 ) -> DraftDecisionResponse:
-    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
-        raise HTTPException(status_code=403, detail="Support staff access required")
     record = db.get(TicketRecord, str(ticket_id))
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")

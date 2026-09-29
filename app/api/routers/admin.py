@@ -366,6 +366,11 @@ def update_user_status(
     record = db.get(UserRecord, str(user_id))
     if record is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if record.role == UserRole.admin.value:
+        # delete_user refuses to remove a peer admin; deactivating one reaches
+        # the same end state (no login, live tokens rejected) through another
+        # door, so it takes the same check.
+        raise HTTPException(status_code=400, detail="Cannot deactivate another admin")
     previous_status = record.is_active
     record.is_active = user_update.is_active
     add_audit_log(

@@ -12,6 +12,13 @@ from app.security.sessions import is_token_revoked
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+STAFF_ROLES = frozenset({UserRole.agent.value, UserRole.admin.value})
+
+
+def is_staff(user: UserRecord) -> bool:
+    """True for the roles that see the whole queue rather than their own tickets."""
+    return user.role in STAFF_ROLES
+
 
 def read_token_claims(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
@@ -40,4 +47,10 @@ def get_current_user(
 def require_admin(current_user: UserRecord = Depends(get_current_user)) -> UserRecord:
     if current_user.role != UserRole.admin.value:
         raise HTTPException(status_code=403, detail="Administrator access required")
+    return current_user
+
+
+def require_staff(current_user: UserRecord = Depends(get_current_user)) -> UserRecord:
+    if not is_staff(current_user):
+        raise HTTPException(status_code=403, detail="Support staff access required")
     return current_user

@@ -7,9 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.agent_assist import AgentAssistResult, assist_ticket
-from app.api.dependencies import get_current_user
+from app.api.dependencies import require_staff
 from app.core.database import get_db
-from app.core.models import TicketCommentRecord, TicketRecord, UserRecord, UserRole
+from app.core.models import TicketCommentRecord, TicketRecord, UserRecord
 
 router = APIRouter()
 
@@ -19,11 +19,9 @@ def get_agent_assist(
     ticket_id: UUID,
     similar_limit: int = Query(default=3, ge=0, le=10),
     kb_limit: int = Query(default=5, ge=0, le=20),
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_staff),
     db: Session = Depends(get_db),
 ) -> AgentAssistResult:
-    if current_user.role not in {UserRole.agent.value, UserRole.admin.value}:
-        raise HTTPException(status_code=403, detail="Support staff access required")
     record = db.get(TicketRecord, str(ticket_id))
     if record is None:
         raise HTTPException(status_code=404, detail="Ticket not found")

@@ -243,7 +243,10 @@ async def receive_channel_message(
 
     if normalized.thread_id:
         open_thread = find_open_thread_ticket(db, channel, normalized.thread_id)
-        if open_thread is not None:
+        if (
+            open_thread is not None
+            and open_thread.customer_id == normalized.customer_id
+        ):
             thread_reply = handle_thread_reply(
                 db,
                 open_thread,
@@ -265,6 +268,25 @@ async def receive_channel_message(
                 content=to_ticket(thread_reply).model_dump(mode="json"),
                 status_code=200,
             )
+        elif open_thread is not None:
+            # The message names a thread that belongs to another customer. All
+            # channels share one secret, so without this check any integration
+            # could post into - and read - someone else's conversation by
+            # quoting its thread id. Fall through and open its own ticket.
+            add_audit_log(
+                db,
+                None,
+                "channel.thread_customer_mismatch",
+                "ticket",
+                open_thread.id,
+                {
+                    "channel": channel,
+                    "thread_id": normalized.thread_id,
+                    "claimed_customer_id": normalized.customer_id,
+                    "ticket_customer_id": open_thread.customer_id,
+                },
+            )
+            db.commit()
 
     guardrail_report = evaluate(
         normalized.message,

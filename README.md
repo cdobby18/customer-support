@@ -152,6 +152,39 @@ Failed logins are throttled per email and client IP: after
 Signing out calls `POST /auth/logout`, which revokes that access token
 server-side. See `.env.example` for the full set of variables.
 
+### Authorization model
+
+Three roles, and every endpoint declares which one it wants:
+
+| Role | Reach |
+|------|-------|
+| `customer` | Its own tickets, its own comments, knowledge search, `/auth/me` |
+| `agent` | Everything `customer` can, plus every ticket in the queue, internal notes, drafts, auto-respond, agent assist |
+| `admin` | Everything `agent` can, plus `/admin/*` analytics, audit logs and user management |
+
+The boundaries that are enforced server-side, not just hidden in the UI:
+
+- Customers see only their own tickets. `GET /tickets` ignores a supplied
+  `customer_id` for a customer and scopes to the caller instead.
+- Internal notes (`is_internal`) are staff-only. They are filtered out of
+  `GET /tickets/{id}/comments` for customers, and a customer cannot create one
+  — a submitted `is_internal: true` is stored as `false`.
+- Customers never receive internal triage output: `risk_score`, `risk_level`,
+  `escalation_summary`, `escalation_route` and `intake_metadata` are `null`
+  in their ticket responses, and guardrail hits keep the rule and severity but
+  drop `matched`, which is the literal PII the rule caught.
+- Customers can only open tickets on the `web` channel. The channel selects the
+  SLA multiplier, so letting a caller choose it would let them choose their own
+  deadline. Channels are otherwise supplied by the integration that received
+  the message.
+- An inbound channel message only joins an existing ticket thread when the
+  sender matches that ticket's customer. All channels share one secret, so a
+  mismatch opens a new ticket and is audited as
+  `channel.thread_customer_mismatch` rather than posting into the other
+  customer's conversation.
+- An admin cannot deactivate another admin, matching the existing rule that an
+  admin cannot delete one.
+
 ## Success Metrics
 
 - reduced first response time

@@ -53,7 +53,9 @@ class EscalationUpdate(BaseModel):
 
 
 class CommentCreate(BaseModel):
-    author_id: str = Field(min_length=1)
+    # Accepted for backwards compatibility and ignored: the server always
+    # attributes a comment to the authenticated caller.
+    author_id: str | None = Field(default=None, min_length=1)
     body: str = Field(min_length=1)
     is_internal: bool = False
 
@@ -266,7 +268,24 @@ class LogoutResponse(BaseModel):
     revoked: bool
 
 
-def to_ticket(record: TicketRecord) -> Ticket:
+GUARDRAIL_HIT_INTERNAL_FIELDS = ("matched",)
+
+
+def redact_guardrail_hits(hits: list[dict] | None) -> list[dict] | None:
+    """Keep what a customer may know (a rule fired, and how serious it is) and
+    drop what they may not: `matched` is the literal PII the rule caught."""
+    if not hits:
+        return None
+    return [
+        {key: value for key, value in hit.items() if key not in GUARDRAIL_HIT_INTERNAL_FIELDS}
+        for hit in hits
+    ]
+
+
+def to_ticket(record: TicketRecord, *, staff_view: bool = True) -> Ticket:
+    """Serialize a ticket. `staff_view=False` is the customer projection: risk
+    scoring, the reviewer summary and raw intake metadata are internal, and
+    guardrail hits lose the matched value."""
     return Ticket(
         id=UUID(record.id),
         customer_id=record.customer_id,
@@ -288,15 +307,19 @@ def to_ticket(record: TicketRecord) -> Ticket:
         triage_summary=record.triage_summary,
         status=TicketStatus(record.status),
         assignee_id=record.assignee_id,
-        risk_score=record.risk_score,
-        risk_level=record.risk_level,
-        escalation_summary=record.escalation_summary,
-        escalation_route=record.escalation_route,
+        risk_score=record.risk_score if staff_view else None,
+        risk_level=record.risk_level if staff_view else None,
+        escalation_summary=record.escalation_summary if staff_view else None,
+        escalation_route=record.escalation_route if staff_view else None,
         created_at=record.created_at,
         updated_at=record.updated_at,
-        intake_metadata=record.intake_metadata,
+        intake_metadata=record.intake_metadata if staff_view else None,
         guardrail_status=record.guardrail_status,
-        guardrail_hits=[dict(hit) for hit in (record.guardrail_hits or [])] if record.guardrail_hits else None,
+        guardrail_hits=(
+            [dict(hit) for hit in record.guardrail_hits]
+            if staff_view and record.guardrail_hits
+            else redact_guardrail_hits(record.guardrail_hits)
+        ),
         external_id=record.external_id,
         thread_id=record.thread_id,
     )
