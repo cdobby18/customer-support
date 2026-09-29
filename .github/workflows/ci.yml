@@ -76,6 +76,114 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  docker:
+    name: Docker image build + smoke test
+    runs-on: ubuntu-latest
+    # The Dockerfile cannot be verified from a developer's machine reliably -
+    # it needs a working daemon, and this repo's author has virtualization
+    # disabled in firmware, so WSL2 and Docker Desktop cannot start there. This
+    # job is the only thing that proves the image builds and that both roles
+    # start, so it is a required check rather than a best-effort one.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        # Heavy: requirements.txt pulls torch, so the first build is a
+        # multi-gigabyte download. Layers are cached by the runner between
+        # runs, but a cold build takes several minutes.
+        run: docker build --tag support-api:${{ github.sha }} .
+
+      - name: Image runs as a non-root user
+        run: |
+          user="$(docker inspect --format '{{.Config.User}}' support-api:${{ github.sha }})"
+          echo "image user: ${user}"
+          if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
+            echo "::error::image does not set a non-root USER"
+            exit 1
+          fi
+
+      - name: Migrations apply to an empty database
+        run: |
+          docker run --rm \
+            -e DATABASE_URL=sqlite:////tmp/migrate.db \
+            support-api:${{ github.sha }} alembic upgrade head
+          docker run --rm \
+            -e DATABASE_URL=sqlite:////tmp/migrate.db \
+            support-api:${{ github.sha }} alembic current
+
+      - name: API serves /health
+        run: |
+          docker run --detach --name support-api \
+            --publish 8000:8000 \
+            -e DATABASE_URL=sqlite:////tmp/api.db \
+            -e APP_ENV=development \
+            -e TRUSTED_HOSTS=localhost,127.0.0.1 \
+            -e SUPPORT_TOOL_PROVIDER=mock \
+            support-api:${{ github.sha }}
+          # Poll the image's own HEALTHCHECK rather than curl, so the probe
+          # command in the Dockerfile is exercised too.
+          for i in $(seq 1 60); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' support-api)"
+            if [ "$status" = "healthy" ]; then
+              echo "container healthy after ${i}s"
+              curl -sf http://127.0.0.1:8000/health
+              exit 0
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              echo "::error::container became unhealthy"
+              docker logs support-api
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::container never became healthy"
+          docker logs support-api
+          exit 1
+
+      - name: Container serves the ticket API
+        # A booted process is not the same as a working API: this checks the
+        # app wired its routers and can reach its database.
+        run: |
+          curl -sf http://127.0.0.1:8000/openapi.json \
+            | python -c 'import json,sys; paths=json.load(sys.stdin)["paths"]; assert "/tickets" in paths, sorted(paths); print(f"{len(paths)} routes exposed")'
+          status="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/tickets)"
+          if [ "$status" != "401" ]; then
+            echo "::error::unauthenticated /tickets returned ${status}, expected 401"
+            exit 1
+          fi
+
+      - name: Worker boots and registers its task
+        run: |
+          # No broker is running, which is the point: the worker must still come
+          # up and register support.notify, so a broken CELERY entrypoint or a
+          # missing task fails here rather than in production.
+          docker run --detach --name support-worker \
+            -e DATABASE_URL=sqlite:////tmp/worker.db \
+            -e CELERY_TASK_ALWAYS_EAGER=0 \
+            -e REDIS_URL=redis://127.0.0.1:6379/0 \
+            support-api:${{ github.sha }} \
+            celery -A app.core.workers worker --loglevel=info --pool=solo
+          for i in $(seq 1 30); do
+            if docker logs support-worker 2>&1 | grep -q "support.notify"; then
+              echo "worker registered support.notify after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::worker never registered support.notify"
+          docker logs support-worker
+          exit 1
+
+      - name: Container logs
+        if: failure()
+        run: |
+          docker logs support-api || true
+          docker logs support-worker || true
+
+      - name: Clean up containers
+        if: always()
+        run: docker rm --force support-api support-worker || true
+
   e2e:
     name: Frontend build + Playwright e2e
     runs-on: ubuntu-latest

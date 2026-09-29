@@ -1,0 +1,54 @@
+# The build context is the whole repo, so anything not needed to run the API or
+# the worker is excluded here rather than with COPY --exclude (which would still
+# send the bytes to the daemon).
+
+# Local environment and secrets. .env is ignored by git; this is belt and
+# braces so a stray file can never be baked into a layer.
+.env
+.env.*
+!.env.example
+
+# VCS and CI
+.git
+.github
+.gitignore
+
+# Python
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+.mypy_cache
+.ruff_cache
+
+# Tests and scratch tooling are not runtime, and requirements-dev.txt's tooling
+# is not installed in the image.
+tests
+requirements-dev.txt
+pytest.ini
+load_tests
+check_db.py
+test_semantic.py
+server.log
+server_out.log
+server_err.log
+
+# The frontend is a separate build artifact, served by a web server, not by this
+# image.
+frontend
+
+# Markdown/task notes
+markdowns
+README.md
+REMAINING_TASKS.md
+
+# Generated at runtime or by tests.
+data/embeddings
+*.db
+*.sqlite3
+.ci-e2e.db

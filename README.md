@@ -126,7 +126,7 @@ Run the backend tests from another terminal:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Expected current result: `202 passed`.
+Expected current result: `295 passed`.
 
 For an end-to-end API smoke test while the API is running:
 
@@ -184,6 +184,61 @@ The boundaries that are enforced server-side, not just hidden in the UI:
   customer's conversation.
 - An admin cannot deactivate another admin, matching the existing rule that an
   admin cannot delete one.
+
+## Run with Docker
+
+One image serves both roles. `requirements.txt` pulls in torch via
+sentence-transformers, so the runtime layer is multiple gigabytes; building two
+images would either duplicate that layer or leave the worker without its
+dependencies. The API is the default command and the worker overrides it.
+
+```powershell
+docker build -t support-api .
+```
+
+**Migrations are a separate step, not part of startup.** `init_db()` uses
+`create_all()`, which creates missing tables but never alters an existing one, so
+an existing database needs Alembic. Running it inside the entrypoint would also
+race when more than one replica starts at once.
+
+```powershell
+docker run --rm -e DATABASE_URL=postgresql+psycopg://user:pass@host:5432/db support-api alembic upgrade head
+```
+
+Run the API:
+
+```powershell
+docker run --rm -p 8000:8000 `
+  -e DATABASE_URL=postgresql+psycopg://user:pass@host:5432/db `
+  -e JWT_SECRET=your-long-random-secret `
+  -e CHANNEL_WEBHOOK_SECRET=your-long-random-webhook-secret `
+  -e APP_ENV=production `
+  -e LLM_PROVIDER=openai `
+  -e OPENAI_API_KEY=sk-... `
+  -e TRUSTED_HOSTS=support.example.com `
+  support-api
+```
+
+Run the worker from the same image:
+
+```powershell
+docker run --rm -e DATABASE_URL=... -e REDIS_URL=redis://redis:6379/0 `
+  -e CELERY_TASK_ALWAYS_EAGER=0 `
+  support-api celery -A app.core.workers worker --loglevel=info --pool=solo
+```
+
+Three details that are deliberate rather than incidental:
+
+- **`--pool=solo`.** The worker imports the same modules as the API, so Celery's
+  default prefork pool would copy a multi-gigabyte torch process per child.
+- **Non-root.** The container runs as uid 10001; it holds the database
+  credentials and the webhook secret, so an escape should not land on root.
+- **`CELERY_TASK_ALWAYS_EAGER` must be `0`.** It defaults to `1`, which runs tasks
+  inline in the API process and makes the worker a no-op.
+
+The image is built and smoke-tested in CI (`docker` job: build, migrations,
+`/health`, unauthenticated 401, worker task registration, non-root user), which
+is what verifies it — not a local `docker build`.
 
 ## Success Metrics
 
