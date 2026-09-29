@@ -292,8 +292,12 @@ jobs:
           POSTGRES_PASSWORD: support
           POSTGRES_DB: support_suite
         ports: ["5432:5432"]
+        # The quotes are load-bearing. `options` is word-split, so an
+        # unquoted `pg_isready -U support -d support_suite` reaches docker
+        # create as three separate arguments and it fails with
+        # "unknown shorthand flag: 'U' in -U" before the container exists.
         options: >-
-          --health-cmd pg_isready -U support -d support_suite
+          --health-cmd "pg_isready -U support -d support_suite"
           --health-interval 5s --health-timeout 5s --health-retries 20
       redis:
         image: redis:7-alpine
