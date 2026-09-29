@@ -638,6 +638,31 @@ def test_channel_webhook_rejects_missing_or_invalid_secret() -> None:
     assert invalid_secret.status_code == 401
 
 
+def test_channel_webhook_rejects_a_payload_with_no_usable_message() -> None:
+    # Every adapter reads vendor-specific keys; a payload carrying none of them
+    # normalizes to an empty message, which pydantic rejects. That is the
+    # sender's bad request, so it must be a 400 and not an unhandled 500.
+    empty = client.post(
+        "/webhooks/email",
+        headers={"X-Webhook-Secret": "local-webhook-secret"},
+        json={},
+    )
+    blank_text = client.post(
+        "/webhooks/slack",
+        headers={"X-Webhook-Secret": "local-webhook-secret"},
+        json={"event": {"user": "U1", "text": ""}},
+    )
+    no_envelope = client.post(
+        "/webhooks/whatsapp",
+        headers={"X-Webhook-Secret": "local-webhook-secret"},
+        json={"entry": [{}]},
+    )
+
+    assert empty.status_code == 400
+    assert blank_text.status_code == 400
+    assert no_envelope.status_code == 400
+
+
 def test_channel_webhook_creates_escalation_for_sensitive_message() -> None:
     response = client.post(
         "/webhooks/slack",

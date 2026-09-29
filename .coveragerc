@@ -16,8 +16,9 @@ exclude_lines =
     @abstractmethod
 
 # Enforced by `coverage report`, so the floor applies whether it is invoked by
-# pytest.ini, by CI, or by hand. Current measurement is 86% (branch=True).
+# pytest.ini, by CI, or by hand. Current measurement is 92% (branch=True).
 # The floor sits a few points below the real number on purpose: a floor set at
 # exactly the current figure turns every unrelated change into a coverage
-# failure and gets ignored. Raise it as the intake/integrations gaps close.
-fail_under = 82
+# failure and gets ignored. Raised from 82 to 89 once the intake adapters were
+# covered; raise it again as the http_json/database gaps close.
+fail_under = 89

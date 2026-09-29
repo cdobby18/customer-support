@@ -16,6 +16,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -215,7 +216,17 @@ async def receive_channel_message(
 
     raw_payload = await request.json()
 
-    normalized = normalize_message(channel, raw_payload)
+    try:
+        normalized = normalize_message(channel, raw_payload)
+    except ValidationError as exc:
+        # A payload the adapter cannot read is the sender's problem, not ours:
+        # the five adapters read vendor field names that change, and a missing
+        # one leaves an empty message. Answer 400 rather than letting pydantic
+        # escape as a 500.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payload does not contain a usable {channel} message",
+        ) from exc
     if normalized is None:
         raise HTTPException(status_code=400, detail=f"No adapter for channel: {channel}")
 
