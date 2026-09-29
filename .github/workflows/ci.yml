@@ -310,11 +310,15 @@ jobs:
       DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_suite
       REDIS_URL: redis://127.0.0.1:6379/0
       APP_ENV: development
-      TRUSTED_HOSTS: 127.0.0.1,localhost
       LLM_PROVIDER: mock
       SUPPORT_TOOL_PROVIDER: mock
       JWT_SECRET: ci-only-not-a-real-secret
       CHANNEL_WEBHOOK_SECRET: ci-only-not-a-real-secret
+      # TRUSTED_HOSTS is deliberately absent. Setting it here replaced the app's
+      # default (localhost,127.0.0.1,testserver) and dropped `testserver`, which
+      # is the Host header the test client sends - so all 124 API tests became
+      # 400 "Invalid host header" on the first run of this job. The default
+      # already covers the live API, which is reached over 127.0.0.1.
 
     steps:
       - uses: actions/checkout@v4

@@ -36,11 +36,22 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="AI Customer Support Automation", lifespan=lifespan)
 
-trusted_hosts = [
-    host.strip()
-    for host in os.getenv("TRUSTED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
-    if host.strip()
-]
+# `testserver` is the Host header Starlette's TestClient sends, and it is in the
+# default on purpose: the whole test suite reaches the app through that client.
+# Setting TRUSTED_HOSTS in a CI job therefore does not merely add a host, it
+# *replaces* the default and silently drops `testserver`, which turns every API
+# test into a 400 "Invalid host header". Any environment that overrides this
+# must keep `testserver` or the tests cannot run at all.
+DEFAULT_TRUSTED_HOSTS = "localhost,127.0.0.1,testserver"
+
+
+def parse_trusted_hosts(raw: str | None) -> list[str]:
+    if raw is None:
+        raw = DEFAULT_TRUSTED_HOSTS
+    return [host.strip() for host in raw.split(",") if host.strip()]
+
+
+trusted_hosts = parse_trusted_hosts(os.getenv("TRUSTED_HOSTS"))
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 
 cors_origins = [
