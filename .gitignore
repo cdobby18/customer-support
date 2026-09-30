@@ -40,6 +40,13 @@ md-files/
 check_db.py
 test_semantic.py
 
+# Generated documentation artifact (rebuild via scripts/build_docs_pdf.py)
+docs/AI-Customer-Support-Automation-Documentation.pdf
+
+# PDF doc generation tooling (local only; the PDF is regenerated on demand)
+scripts/build_docs_pdf.py
+scripts/render_docs_pdf.mjs
+
 # Local credential scratch files
 users.txt
 
