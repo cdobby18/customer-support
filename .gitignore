@@ -26,6 +26,8 @@ data/embeddings/
 server_err.log
 server_out.log
 server.log
+dev-server.log
+dev-server.err.log
 
 # ENV — .env holds real secrets and is ignored; .env.example is the
 # committed reference of supported variables and must be tracked.
@@ -37,6 +39,9 @@ md-files/
 # Scratch scripts kept out of the repo
 check_db.py
 test_semantic.py
+
+# Local credential scratch files
+users.txt
 
 
 # Uploaded ticket attachments (runtime data)
