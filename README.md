@@ -13,6 +13,12 @@ This project is designed for an AI-first support system that can:
 - escalate risky or unresolved issues to human agents
 - track performance with SLA, CSAT, and resolution metrics
 
+## Documentation
+
+Full documentation lives in [docs/](docs/README.md): architecture, setup,
+configuration, API reference, data model, frontend, AI agents, integrations,
+testing, deployment, and operations runbooks.
+
 ## Core Features
 
 - Ticket intake and normalization
