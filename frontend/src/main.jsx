@@ -1595,6 +1595,9 @@ export default function App() {
       logout();
     }
   };
+  // Login/logout swap the whole shell; drop any scroll position left over
+  // from focusing the auth form so the staff view opens at its top.
+  useEffect(() => { window.scrollTo(0, 0); }, [session !== null]);
   useEffect(() => {
     setSessionExpiredHandler(() => { setBanner("Your session expired. Please sign in again."); logout(); });
     return () => setSessionExpiredHandler(null);
