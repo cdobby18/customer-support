@@ -263,6 +263,14 @@ jobs:
           cat /tmp/api.log
           exit 1
 
+      - name: Seed the e2e admin account
+        # Registration only ever creates customers, so the staff e2e spec needs
+        # an admin seeded straight into the throwaway database. Run after the
+        # API is up so its lifespan has already created the schema.
+        env:
+          DATABASE_URL: sqlite:///./.ci-e2e.db
+        run: python scripts/seed_e2e_admin.py
+
       - name: Run Playwright e2e
         # playwright.config.ts starts the vite dev server itself; only the
         # API needs to be running beforehand.

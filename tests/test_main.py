@@ -2191,3 +2191,50 @@ def test_attachment_upload_enforces_size_limit(monkeypatch: pytest.MonkeyPatch) 
     )
 
     assert upload.status_code == 413
+
+
+def test_ticket_list_is_paginated_and_reports_totals() -> None:
+    for index in range(5):
+        client.post(
+            "/tickets",
+            headers=admin_headers(),
+            json={"customer_id": f"pager-{index}", "message": f"Pagination probe {index}"},
+        )
+
+    first_page = client.get("/tickets?limit=2", headers=admin_headers())
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    total = int(first_page.headers["X-Total-Count"])
+    assert total >= 5
+    assert first_page.headers["X-Has-More"] == "true"
+
+    last_page = client.get(f"/tickets?limit=2&offset={total - 1}", headers=admin_headers())
+    assert len(last_page.json()) == 1
+    assert last_page.headers["X-Has-More"] == "false"
+
+    ids_first = {ticket["id"] for ticket in first_page.json()}
+    ids_last = {ticket["id"] for ticket in last_page.json()}
+    assert not ids_first & ids_last
+
+
+def test_ticket_list_search_matches_older_rows_beyond_the_first_page() -> None:
+    marker = "needle-zebra-9f2"
+    client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "search-owner", "message": f"older {marker} ticket"},
+    )
+    for index in range(3):
+        client.post(
+            "/tickets",
+            headers=admin_headers(),
+            json={"customer_id": f"filler-{index}", "message": f"unrelated filler {index}"},
+        )
+
+    response = client.get(f"/tickets?limit=1&q={marker}", headers=admin_headers())
+
+    assert response.status_code == 200
+    matches = response.json()
+    assert len(matches) == 1
+    assert marker in matches[0]["message"]
+    assert int(response.headers["X-Total-Count"]) == 1

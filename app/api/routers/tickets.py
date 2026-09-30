@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.agents.auto_response import (
@@ -265,13 +265,21 @@ def update_escalation(
 
 @router.get("/tickets", response_model=list[Ticket])
 def list_tickets(
+    response: Response,
     ticket_status: TicketStatus | None = Query(default=None, alias="status"),
     customer_id: str | None = None,
+    q: str | None = None,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     current_user: UserRecord = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Ticket]:
     staff_view = is_staff(current_user)
-    query = select(TicketRecord).order_by(TicketRecord.created_at)
+    # Newest first: the queue list is paginated, so ascending order would put
+    # the oldest rows on page one and hide every new conversation until the
+    # user paged all the way down. The client still re-sorts the loaded page by
+    # SLA urgency.
+    query = select(TicketRecord).order_by(TicketRecord.created_at.desc())
     if not staff_view:
         # A customer-supplied customer_id filter must not widen the result set.
         customer_id = current_user.id
@@ -279,8 +287,25 @@ def list_tickets(
         query = query.where(TicketRecord.status == ticket_status.value)
     if customer_id is not None:
         query = query.where(TicketRecord.customer_id == customer_id)
+    if q:
+        # The queue list is paginated, so the search box has to run against the
+        # whole table here; filtering only the loaded page would silently hide
+        # older matches.
+        pattern = f"%{q.strip()}%"
+        query = query.where(
+            or_(
+                TicketRecord.message.ilike(pattern),
+                TicketRecord.intent.ilike(pattern),
+                TicketRecord.customer_id.ilike(pattern),
+            )
+        )
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    if limit is not None:
+        query = query.offset(offset).limit(limit)
     records = db.scalars(query).all()
     stats = build_ticket_stats(db, records)
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Has-More"] = "true" if offset + len(records) < total else "false"
     return [
         to_ticket(record, staff_view=staff_view, **stats[record.id])
         for record in records

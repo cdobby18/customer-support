@@ -11,7 +11,7 @@ function setSessionExpiredHandler(handler) {
   onSessionExpired = handler;
 }
 
-async function apiRequest(path, options = {}, token = null) {
+async function apiRequestWithMeta(path, options = {}, token = null) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${API_URL}${path}`, { ...options, headers });
@@ -21,7 +21,11 @@ async function apiRequest(path, options = {}, token = null) {
     const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
     throw new Error(detail || "Something went wrong");
   }
-  return body;
+  return { body, headers: response.headers };
+}
+
+async function apiRequest(path, options = {}, token = null) {
+  return (await apiRequestWithMeta(path, options, token)).body;
 }
 
 async function uploadAttachments(ticketId, files, token) {
@@ -1140,13 +1144,14 @@ function AppShell({ session, onLogout }) {
   const [statusFilter, setStatusFilter] = useState("");
   const [query, setQuery] = useState("");
   const [slaMode, setSlaMode] = useState("");
-  const [newMessage, setNewMessage] = useState("");
-  const [comment, setComment] = useState("");
   const [comments, setComments] = useState([]);
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [activeView, setActiveView] = useState("inbox");
-  const [expandTickets, setExpandTickets] = useState(false);
+  const [queueLimit, setQueueLimit] = useState(20);
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [queueHasMore, setQueueHasMore] = useState(false);
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [topic, setTopic] = useState("");
   const [feedbackRating, setFeedbackRating] = useState(0);
   const [feedbackComment, setFeedbackComment] = useState("");
@@ -1163,6 +1168,13 @@ function AppShell({ session, onLogout }) {
   const [newFiles, setNewFiles] = useState([]);
   const [newTicketFiles, setNewTicketFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [composerBusy, setComposerBusy] = useState(false);
+  const composerProps = { onFocus: () => setComposerBusy(true), onBlur: () => setComposerBusy(false) };
+  // The reply and new-ticket drafts are uncontrolled on purpose: a controlled
+  // value gets rewritten on every re-render, which silently drops whatever the
+  // user has typed since the last state commit (queue polls, notices, uploads).
+  const commentRef = useRef(null);
+  const newMessageRef = useRef(null);
 
   const selectedTicket = tickets.find((ticket) => ticket.id === selectedId) || null;
   const isStaff = session.user.role !== "customer";
@@ -1170,19 +1182,31 @@ function AppShell({ session, onLogout }) {
   async function loadTickets(silent = false) {
     if (!silent) setLoading(true);
     try {
-      const path = statusFilter ? `/tickets?status=${encodeURIComponent(statusFilter)}` : "/tickets";
-      const result = await apiRequest(path, {}, session.access_token);
-      setTickets(result);
-      if (!selectedId && result.length) setSelectedId(result[0].id);
-      if (selectedId && !result.some((ticket) => ticket.id === selectedId)) setSelectedId(result[0]?.id || null);
+      const params = new URLSearchParams({ limit: String(queueLimit) });
+      if (statusFilter) params.set("status", statusFilter);
+      if (debouncedQuery) params.set("q", debouncedQuery);
+      const { body, headers } = await apiRequestWithMeta(`/tickets?${params.toString()}`, {}, session.access_token);
+      setTickets(body);
+      setQueueTotal(Number(headers.get("X-Total-Count")) || body.length);
+      setQueueHasMore(headers.get("X-Has-More") === "true");
+      if (!selectedId && body.length) setSelectedId(body[0].id);
+      if (selectedId && !body.some((ticket) => ticket.id === selectedId)) setSelectedId(body[0]?.id || null);
     } catch (error) { if (!silent) setNotice(error.message); }
     finally { if (!silent) setLoading(false); }
   }
 
   const loadTicketsRef = useRef(loadTickets);
   loadTicketsRef.current = loadTickets;
+  const composerBusyRef = useRef(composerBusy);
+  composerBusyRef.current = composerBusy;
 
-  useEffect(() => { loadTickets(); }, [statusFilter, activeView]);
+  useEffect(() => { loadTickets(); }, [statusFilter, activeView, queueLimit, debouncedQuery]);
+
+  useEffect(() => {
+    // Typing refetches the queue, so wait for a pause before hitting the API.
+    const timer = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1198,6 +1222,10 @@ function AppShell({ session, onLogout }) {
     checkHealth();
     const healthTimer = setInterval(checkHealth, 15000);
     const queueTimer = setInterval(() => {
+      // Re-rendering mid-compose makes the controlled textareas drop whatever
+      // the user has typed since the last state commit, so hold off until they
+      // leave the field.
+      if (composerBusyRef.current) return;
       if (activeView === "inbox" || activeView === "conversations") loadTicketsRef.current(true);
     }, 15000);
     return () => { cancelled = true; clearInterval(healthTimer); clearInterval(queueTimer); };
@@ -1262,11 +1290,13 @@ function AppShell({ session, onLogout }) {
 
   async function createTicket(event) {
     event.preventDefault();
-    if (!newMessage.trim()) return;
+    const body = (newMessageRef.current?.value ?? "").trim();
+    if (!body) return;
     try {
-      const message = topic ? `[${topic}] ${newMessage.trim()}` : newMessage.trim();
+      const message = topic ? `[${topic}] ${body}` : body;
       const ticket = await apiRequest("/tickets", { method: "POST", body: JSON.stringify({ customer_id: session.user.id, message, channel: "web" }) }, session.access_token);
-      setNewMessage(""); setTopic("");
+      if (newMessageRef.current) newMessageRef.current.value = "";
+      setTopic("");
       await loadTickets(); setSelectedId(ticket.id);
       if (newTicketFiles.length) {
         setUploading(true);
@@ -1310,10 +1340,12 @@ function AppShell({ session, onLogout }) {
 
   async function addComment(event) {
     event.preventDefault();
-    if (!comment.trim()) return;
+    const body = (commentRef.current?.value ?? "").trim();
+    if (!body) return;
     try {
-      const created = await apiRequest(`/tickets/${selectedTicket.id}/comments`, { method: "POST", body: JSON.stringify({ author_id: session.user.id, body: comment, is_internal: isStaff && isInternal }) }, session.access_token);
-      setComments((current) => [...current, created]); setComment("");
+      const created = await apiRequest(`/tickets/${selectedTicket.id}/comments`, { method: "POST", body: JSON.stringify({ author_id: session.user.id, body, is_internal: isStaff && isInternal }) }, session.access_token);
+      setComments((current) => [...current, created]);
+      if (commentRef.current) commentRef.current.value = "";
       if (newFiles.length) {
         setUploading(true);
         try {
@@ -1405,7 +1437,7 @@ function AppShell({ session, onLogout }) {
       : slaViewTickets;
   const visibleTickets = sortedViewTickets.filter((ticket) => `${ticket.message} ${ticket.intent} ${ticket.customer_id}`.toLowerCase().includes(query.toLowerCase()));
   const staffName = (userId) => staff.find((user) => user.id === userId)?.email?.split("@")[0] || null;
-  const shownTickets = expandTickets ? visibleTickets : visibleTickets.slice(0, 10);
+  const shownTickets = visibleTickets;
 
 return (
     <div className="app-shell">
@@ -1456,8 +1488,8 @@ return (
           <section className="desk-grid">
             <div className="ticket-column">
               <div className="toolbar"><div className="search-box"><Search size={16} /><input placeholder="Search tickets" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="pending">Pending</option><option value="resolved">Resolved</option></select><select value={slaMode} onChange={(event) => setSlaMode(event.target.value)}><option value="">All deadlines</option><option value="overdue">Overdue only</option><option value="soon">Due within 24h</option><option value="urgency">SLA urgency</option></select>{isStaff && <select value={assigneeFilter} onChange={(event) => setAssigneeFilter(event.target.value)}><option value="">All assignees</option><option value="mine">Assigned to me</option><option value="unassigned">Unassigned</option></select>}</div>
-              <div className="ticket-list">{loading ? <div className="empty-state">Loading queue...</div> : visibleTickets.length ? shownTickets.map((ticket) => { const sla = slaStatus(ticket); return <button className={`ticket-row ${ticket.id === selectedId ? "selected" : ""} ${isTicketSlaOverdue(ticket) ? "overdue" : ""}`} key={ticket.id} onClick={() => selectTicket(ticket)}><div className="ticket-row-top"><span className={`status-dot ${ticket.status}`} /> <strong>{ticket.intent.replace("_", " ")}</strong>{isStaff && ticket.guardrail_status === "flagged" && <span className="guardrail-badge"><ShieldAlert size={12} /> flagged</span>}<span className={`priority ${ticket.priority}`}>{ticket.priority}</span></div><p>{ticket.message}</p><div className="ticket-row-meta"><span className={`channel-badge ${ticket.channel || "other"}`}>{channelMeta(ticket.channel).icon} {channelMeta(ticket.channel).label}</span>{!isStaff && unseen[ticket.id] && <span className="reply-badge"><MessageSquare size={11} /> New reply</span>}<span className="thread-id">#{ticket.id.slice(0, 8)}</span>{(isStaff ? <span className={`sla-chip ${sla.class}`} title={ticket.sla_due_at ? `SLA due ${formatDate(ticket.sla_due_at)}` : "No SLA deadline"}><Clock size={12} /> {sla.label}</span> : ticket.sla_due_at ? <span className={`sla-chip ${sla.class}`} title={`We aim to reply by ${formatDate(ticket.sla_due_at)}`}><Clock size={12} /> Reply by {formatDate(ticket.sla_due_at)}</span> : null)}{isStaff && ticket.assignee_id && <span className="assignee-chip" title="Assigned agent">@ {staffName(ticket.assignee_id) || ticket.assignee_id.slice(0, 6)}</span>}<small>{isStaff ? `${ticket.customer_id}` : ""}<span className="meta-sep">·</span>{new Date(ticket.created_at).toLocaleDateString()}</small></div></button>; }) : <div className="empty-state"><Inbox size={28} /><strong>{activeView === "conversations" ? "No past conversations" : "No tickets here"}</strong><span>{activeView === "conversations" ? "Resolved and closed tickets will appear here." : "New conversations will appear in this queue."}</span></div>}{visibleTickets.length > 10 && <button className="show-more" onClick={() => setExpandTickets((value) => !value)}>{expandTickets ? "Show fewer" : `Show all ${visibleTickets.length} tickets`}</button>}</div>
-              {!isStaff && <form className="new-ticket" onSubmit={createTicket}><label>How can we help?<textarea value={newMessage} onChange={(event) => setNewMessage(event.target.value)} placeholder="Tell us what happened..." rows="3" required /></label><label className="file-field"><Paperclip size={15} /><span>Attach files{newTicketFiles.length ? ` (${newTicketFiles.length})` : ""}</span><input type="file" multiple onChange={(event) => setNewTicketFiles([...event.target.files])} /></label><div className="topic-chips"><span>Quick topics</span>{Object.entries(TOPIC_PRESETS).map(([key, example]) => <button type="button" key={key} className={topic === key ? "active" : ""} onClick={() => { setTopic(key); setNewMessage(example); }}>{key}</button>)}{topic && <button type="button" className="clear-topic" onClick={() => { setTopic(""); }}>Clear topic</button>}</div><div className="new-ticket-actions"><button className="secondary-button" type="submit"><Plus size={16} /> Submit ticket</button><button type="button" className="help-link" onClick={() => setActiveView("help")}><BookOpen size={15} /> Search help center first</button></div></form>}
+              <div className="ticket-list">{loading ? <div className="empty-state">Loading queue...</div> : visibleTickets.length ? shownTickets.map((ticket) => { const sla = slaStatus(ticket); return <button className={`ticket-row ${ticket.id === selectedId ? "selected" : ""} ${isTicketSlaOverdue(ticket) ? "overdue" : ""}`} key={ticket.id} onClick={() => selectTicket(ticket)}><div className="ticket-row-top"><span className={`status-dot ${ticket.status}`} /> <strong>{ticket.intent.replace("_", " ")}</strong>{isStaff && ticket.guardrail_status === "flagged" && <span className="guardrail-badge"><ShieldAlert size={12} /> flagged</span>}<span className={`priority ${ticket.priority}`}>{ticket.priority}</span></div><p>{ticket.message}</p><div className="ticket-row-meta"><span className={`channel-badge ${ticket.channel || "other"}`}>{channelMeta(ticket.channel).icon} {channelMeta(ticket.channel).label}</span>{!isStaff && unseen[ticket.id] && <span className="reply-badge"><MessageSquare size={11} /> New reply</span>}<span className="thread-id">#{ticket.id.slice(0, 8)}</span>{(isStaff ? <span className={`sla-chip ${sla.class}`} title={ticket.sla_due_at ? `SLA due ${formatDate(ticket.sla_due_at)}` : "No SLA deadline"}><Clock size={12} /> {sla.label}</span> : ticket.sla_due_at ? <span className={`sla-chip ${sla.class}`} title={`We aim to reply by ${formatDate(ticket.sla_due_at)}`}><Clock size={12} /> Reply by {formatDate(ticket.sla_due_at)}</span> : null)}{isStaff && ticket.assignee_id && <span className="assignee-chip" title="Assigned agent">@ {staffName(ticket.assignee_id) || ticket.assignee_id.slice(0, 6)}</span>}<small>{isStaff ? `${ticket.customer_id}` : ""}<span className="meta-sep">·</span>{new Date(ticket.created_at).toLocaleDateString()}</small></div></button>; }) : <div className="empty-state"><Inbox size={28} /><strong>{activeView === "conversations" ? "No past conversations" : "No tickets here"}</strong><span>{activeView === "conversations" ? "Resolved and closed tickets will appear here." : "New conversations will appear in this queue."}</span></div>}{queueHasMore && <button className="show-more" onClick={() => setQueueLimit((value) => value + 20)} disabled={loading}>{loading ? "Loading..." : `Load more (${shownTickets.length} of ${queueTotal})`}</button>}</div>
+              {!isStaff && <form className="new-ticket" onSubmit={createTicket}><label>How can we help?<textarea {...composerProps} ref={newMessageRef} defaultValue="" placeholder="Tell us what happened..." rows="3" required /></label><label className="file-field"><Paperclip size={15} /><span>Attach files{newTicketFiles.length ? ` (${newTicketFiles.length})` : ""}</span><input type="file" multiple onChange={(event) => setNewTicketFiles([...event.target.files])} /></label><div className="topic-chips"><span>Quick topics</span>{Object.entries(TOPIC_PRESETS).map(([key, example]) => <button type="button" key={key} className={topic === key ? "active" : ""} onClick={() => { setTopic(key); if (newMessageRef.current) newMessageRef.current.value = example; }}>{key}</button>)}{topic && <button type="button" className="clear-topic" onClick={() => { setTopic(""); }}>Clear topic</button>}</div><div className="new-ticket-actions"><button className="secondary-button" type="submit"><Plus size={16} /> Submit ticket</button><button type="button" className="help-link" onClick={() => setActiveView("help")}><BookOpen size={15} /> Search help center first</button></div></form>}
             </div>
             <div className="detail-column">{selectedTicket ? (
           <>
@@ -1494,7 +1526,7 @@ return (
             )}
             {isStaff && <div className="status-actions"><span>Move ticket</span>{["open", "in_progress", "pending", "resolved", "closed"].map((status) => <button className={selectedTicket.status === status ? "active" : ""} key={status} onClick={() => updateTicket(status)}>{status.replace("_", " ")}</button>)}</div>}
             {attachments.length ? <div className="conversation attach-list"><div className="conversation-heading"><h3>Attachments</h3><span>{attachments.length} file{attachments.length > 1 ? "s" : ""}</span></div>{attachments.map((attachment) => <div className="attachment-row" key={attachment.id}><Paperclip size={14} /><span className="attachment-name" title={attachment.filename}>{attachment.filename}</span><small>{attachment.size > 1048576 ? `${(attachment.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(attachment.size / 1024))} KB`}</small><button type="button" className="attachment-download" onClick={() => downloadAttachment(attachment)} aria-label={`Download ${attachment.filename}`}><Download size={14} /></button></div>)}</div> : null}
-            <div className="conversation"><div className="conversation-heading"><h3>Conversation</h3><span>{comments.length} messages</span></div>{comments.length ? comments.map((item) => <article className={`message ${item.is_internal ? "internal" : ""} ${item.author_id === "ai-assistant" ? "ai" : ""}`} key={item.id}><div className="message-avatar"><Sparkles size={15} /></div><div><div className="message-meta"><strong>{item.author_id === session.user.id ? "You" : item.author_id === "ai-assistant" ? "Relay AI" : item.author_id}</strong>{item.author_id === "ai-assistant" && <span className="ai-tag">AI</span>}{item.is_internal && <span>Internal note</span>}<time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></div></article>) : <div className="empty-conversation">No messages yet.</div>}{isStaff || !["resolved", "closed"].includes(selectedTicket.status) ? <form className="comment-form" onSubmit={addComment}>{isStaff && <div className="comment-visibility" role="group" aria-label="Comment visibility"><button type="button" className={!isInternal ? "active" : ""} onClick={() => setIsInternal(false)}><Send size={13} /> Reply to customer</button><button type="button" className={isInternal ? "active" : ""} onClick={() => setIsInternal(true)}><Lock size={13} /> Internal note</button></div>}<textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isStaff ? (isInternal ? "Write an internal note..." : "Write a customer-facing reply...") : "Write a reply..."} rows="3" /><label className="file-field"><Paperclip size={15} /><span>Attach{newFiles.length ? ` (${newFiles.length})` : " files"}</span><input type="file" multiple onChange={(event) => setNewFiles([...event.target.files])} disabled={uploading} /></label><button className="primary-button">{uploading ? "Uploading..." : !isStaff || isInternal ? "Send" : "Send reply"} <ArrowRight size={16} /></button></form> : <div className="resolved-note"><CheckCircle2 size={14} /> This conversation is resolved. Open a new one from the left for anything else.</div>}</div>
+            <div className="conversation"><div className="conversation-heading"><h3>Conversation</h3><span>{comments.length} messages</span></div>{comments.length ? comments.map((item) => <article className={`message ${item.is_internal ? "internal" : ""} ${item.author_id === "ai-assistant" ? "ai" : ""}`} key={item.id}><div className="message-avatar"><Sparkles size={15} /></div><div><div className="message-meta"><strong>{item.author_id === session.user.id ? "You" : item.author_id === "ai-assistant" ? "Relay AI" : item.author_id}</strong>{item.author_id === "ai-assistant" && <span className="ai-tag">AI</span>}{item.is_internal && <span>Internal note</span>}<time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></div></article>) : <div className="empty-conversation">No messages yet.</div>}{isStaff || !["resolved", "closed"].includes(selectedTicket.status) ? <form className="comment-form" onSubmit={addComment}>{isStaff && <div className="comment-visibility" role="group" aria-label="Comment visibility"><button type="button" className={!isInternal ? "active" : ""} onClick={() => setIsInternal(false)}><Send size={13} /> Reply to customer</button><button type="button" className={isInternal ? "active" : ""} onClick={() => setIsInternal(true)}><Lock size={13} /> Internal note</button></div>}<textarea {...composerProps} ref={commentRef} defaultValue="" placeholder={isStaff ? (isInternal ? "Write an internal note..." : "Write a customer-facing reply...") : "Write a reply..."} rows="3" /><label className="file-field"><Paperclip size={15} /><span>Attach{newFiles.length ? ` (${newFiles.length})` : " files"}</span><input type="file" multiple onChange={(event) => setNewFiles([...event.target.files])} disabled={uploading} /></label><button className="primary-button">{uploading ? "Uploading..." : !isStaff || isInternal ? "Send" : "Send reply"} <ArrowRight size={16} /></button></form> : <div className="resolved-note"><CheckCircle2 size={14} /> This conversation is resolved. Open a new one from the left for anything else.</div>}</div>
             {!isStaff && (selectedTicket.status === "resolved" || selectedTicket.status === "closed") && (
               <div className="feedback-panel">
                 <h4><Star size={15} /> How did we do?</h4>
