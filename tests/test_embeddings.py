@@ -1,4 +1,5 @@
 import pickle
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -181,3 +182,119 @@ def test_semantic_search_returns_empty_on_dimension_mismatch(
     monkeypatch.setattr(emb, "get_embedding_provider", lambda: DimMismatchProvider())
 
     assert emb.semantic_search("anything", limit=1) == []
+
+
+def test_warmup_is_off_under_pytest_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A background model load would steal CPU from the suite, so `auto` skips it."""
+    monkeypatch.delenv("EMBEDDING_WARMUP", raising=False)
+    monkeypatch.setattr(emb, "_running_under_pytest", lambda: True)
+    assert emb.warmup_enabled() is False
+
+
+def test_warmup_auto_is_on_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EMBEDDING_WARMUP", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setattr(emb, "_running_under_pytest", lambda: False)
+    assert emb.warmup_enabled() is True
+
+
+def test_warmup_auto_is_off_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_WARMUP", "auto")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setattr(emb, "_running_under_pytest", lambda: False)
+    assert emb.warmup_enabled() is False
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off"])
+def test_warmup_explicit_off_overrides_everything(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("EMBEDDING_WARMUP", raw)
+    monkeypatch.setattr(emb, "_running_under_pytest", lambda: False)
+    assert emb.warmup_enabled() is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "yes", "on"])
+def test_warmup_explicit_on_overrides_pytest_default(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("EMBEDDING_WARMUP", raw)
+    monkeypatch.setattr(emb, "_running_under_pytest", lambda: True)
+    assert emb.warmup_enabled() is True
+
+
+def test_warm_in_background_skips_remote_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote provider has no local model to preload, and warming it would call the API."""
+    monkeypatch.setenv("EMBEDDING_WARMUP", "1")
+    monkeypatch.setattr(emb, "get_embedding_provider", lambda: _fake_provider_factory("m"))
+    assert emb.warm_in_background() is False
+
+
+def test_warm_in_background_starts_and_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid on-disk cache must not stop the model itself from being loaded."""
+    monkeypatch.setenv("EMBEDDING_WARMUP", "1")
+    provider = emb.LocalEmbeddingProvider()
+    monkeypatch.setattr(emb, "get_embedding_provider", lambda: provider)
+
+    indexed = threading.Event()
+    embedded: list[list[str]] = []
+    done = threading.Event()
+
+    monkeypatch.setattr(emb, "ensure_index", lambda: indexed.set())
+
+    def fake_embed(texts):
+        embedded.append(list(texts))
+        done.set()
+        return np.zeros((len(texts), 3), dtype=np.float32)
+
+    monkeypatch.setattr(provider, "embed", fake_embed)
+
+    assert emb.warm_in_background() is True
+    assert done.wait(timeout=5), "warm-up never embedded, so the model stays cold"
+    assert indexed.is_set()
+    assert embedded == [["warmup"]]
+
+
+def test_warm_in_background_swallows_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replica must still serve when the knowledge base cannot be loaded."""
+    monkeypatch.setenv("EMBEDDING_WARMUP", "1")
+    monkeypatch.setattr(emb, "get_embedding_provider", lambda: emb.LocalEmbeddingProvider())
+
+    def boom() -> None:
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(emb, "ensure_index", boom)
+
+    logged = threading.Event()
+    warnings: list[str] = []
+
+    class _Logger:
+        def warning(self, msg, *args):
+            warnings.append(msg % args if args else msg)
+            logged.set()
+
+        def info(self, msg, *args):
+            pass
+
+    assert emb.warm_in_background(_Logger()) is True
+    assert logged.wait(timeout=5), "warm-up failure was never logged"
+    assert any("model unavailable" in w for w in warnings)
+
+
+def test_warm_in_background_skipped_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_WARMUP", "off")
+    assert emb.warm_in_background() is False

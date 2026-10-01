@@ -692,6 +692,7 @@ function AiDraftPanel({ session }) {
   const [autoResult, setAutoResult] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drafting, setDrafting] = useState(false);
+  const [draftElapsed, setDraftElapsed] = useState(0);
   const [autoRunning, setAutoRunning] = useState(false);
   const [deciding, setDeciding] = useState(false);
   const [resolveOnApprove, setResolveOnApprove] = useState(true);
@@ -719,12 +720,18 @@ function AiDraftPanel({ session }) {
   async function generateDraft() {
     if (!selectedTicket) return;
     setDrafting(true);
+    setDraftElapsed(0);
     setNotice("");
+    const startedAt = Date.now();
+    const ticker = setInterval(() => setDraftElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
     try {
       const result = await apiRequest(`/tickets/${selectedTicket.id}/response-draft`, { method: "POST" }, session.access_token);
       setDraft(result);
+      if (result.reasons?.includes("no_knowledge_matches")) {
+        setNotice("No knowledge base article matched closely enough, so this is a placeholder — a human should write the reply.");
+      }
     } catch (error) { setNotice(error.message); }
-    finally { setDrafting(false); }
+    finally { clearInterval(ticker); setDrafting(false); }
   }
 
   async function approveDraft() {
@@ -836,7 +843,7 @@ function AiDraftPanel({ session }) {
               </div>
               <div className="draft-actions">
                 <button className="primary-button draft-generate" onClick={generateDraft} disabled={drafting || deciding}>
-                  <Sparkles size={16} /> {drafting ? "Generating draft..." : "Generate AI draft"}
+                  <Sparkles size={16} /> {drafting ? `Generating draft... ${draftElapsed}s` : "Generate AI draft"}
                 </button>
                 <button className="secondary-button draft-auto" onClick={runAutoRespond} disabled={autoRunning || deciding}>
                   <CheckCircle2 size={16} /> {autoRunning ? "Running..." : "Auto-respond"}
@@ -856,6 +863,11 @@ function AiDraftPanel({ session }) {
                   </>
                 )}
               </div>
+              {drafting && draftElapsed >= 8 && (
+                <div className="auto-result" role="status">
+                  <><CircleAlert size={15} /> Still working — the embedding model is still loading (it warms in the background at startup and takes about a minute). Later drafts are near-instant.</>
+                </div>
+              )}
               {autoResult && (
                 <div className={`auto-result ${autoResult.action}`}>
                   {autoResult.action === "auto_sent" ? (

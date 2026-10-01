@@ -14,6 +14,9 @@ model to the 1536-dim OpenAI model) the index is rebuilt automatically.
 
 import os
 import pickle
+import sys
+import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable
@@ -262,3 +265,73 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
             }
         )
     return results
+
+
+def _running_under_pytest() -> bool:
+    return "pytest" in sys.modules
+
+
+def warmup_enabled() -> bool:
+    """Whether to preload the embedding model in the background at startup.
+
+    Defaults to on for a local dev run and off under pytest or in production.
+    The test suite drives the app through ``TestClient``, so a background load
+    would compete with the tests for the same CPU and add a minute of wall clock
+    to a run that never issues a real search.
+    """
+    raw = os.getenv("EMBEDDING_WARMUP", "auto").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if _running_under_pytest():
+        return False
+    return os.getenv("APP_ENV", "development").strip().lower() != "production"
+
+
+def warm_in_background(logger: Any = None) -> bool:
+    """Preload the local embedding model and index on a daemon thread.
+
+    Importing the app does not load sentence-transformers, so the first
+    knowledge query in a process pays for it: measured at roughly 50-110s
+    depending on disk cache, against single-digit milliseconds once warm. That
+    latency lands on the first person to click "Generate AI draft" and looks
+    like a hung request rather than a cold start.
+
+    Moving it to a background thread at startup keeps it off the request path.
+    Failures are logged and swallowed because a replica must still serve
+    requests when the knowledge base is unusable -- the search raises on its
+    own if the warm-up never completed.
+
+    Returns whether a warm-up thread was actually started.
+    """
+    if not warmup_enabled():
+        return False
+    try:
+        provider = get_embedding_provider()
+    except EmbeddingConfigError:
+        return False
+    if provider.name != "local":
+        return False
+
+    def _warm() -> None:
+        started = time.perf_counter()
+        try:
+            ensure_index()
+            # `ensure_index` returns early from the on-disk cache without ever
+            # calling `embed`, and the model load is the expensive part (tens of
+            # seconds). Embedding one throwaway string is what actually pulls
+            # sentence-transformers into the process, so the first real query
+            # does not pay for it.
+            provider.embed(["warmup"])
+        except Exception as exc:  # noqa: BLE001 - never take the process down
+            if logger is not None:
+                logger.warning("embedding warmup failed: %s", exc)
+            return
+        if logger is not None:
+            logger.info(
+                "embedding warmup ready in %.1fs", time.perf_counter() - started
+            )
+
+    threading.Thread(target=_warm, name="embedding-warmup", daemon=True).start()
+    return True

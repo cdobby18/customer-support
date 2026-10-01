@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.agents.embeddings import warm_in_background
 from app.api.routers import admin, agent_assist, auth, system, tickets, webhooks
 from app.core.config_validation import validate_security_configuration
 from app.core.database import (
@@ -76,6 +77,7 @@ async def lifespan(_: FastAPI):
     validate_security_configuration()
     init_db()
     warn_if_schema_not_migrated(get_app_logger())
+    warm_in_background(get_app_logger())
     setup_tracing(app)
     yield
 
