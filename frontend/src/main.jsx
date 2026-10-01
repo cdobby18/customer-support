@@ -506,22 +506,33 @@ function EscalationReviewPanel({ session }) {
   const [reviewReason, setReviewReason] = useState("");
   const [reviewAction, setReviewAction] = useState("");
   const [reviewLoading, setReviewLoading] = useState(false);
+  const [limit, setLimit] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
 
   const selectedEscalation = escalations.find((e) => e.id === selectedId) || null;
 
   async function loadEscalations() {
     setLoading(true);
     try {
-      // Filtered server-side: the escalation queue used to fetch every ticket
-      // in the table and pick the pending ones out client-side.
-      const result = await apiRequest("/tickets?escalation_status=pending&limit=200", {}, session.access_token);
-      setEscalations(result);
-      if (!selectedId && result.length) setSelectedId(result[0].id);
+      // Filtered and paginated server-side: this used to fetch every ticket in
+      // the table and pick the pending ones out client-side, discarding almost
+      // all of them.
+      const { body, headers } = await apiRequestWithMeta(
+        `/tickets?escalation_status=pending&limit=${limit}`,
+        {},
+        session.access_token,
+      );
+      setEscalations(body);
+      setTotal(Number(headers.get("X-Total-Count")) || body.length);
+      setHasMore(headers.get("X-Has-More") === "true");
+      if (!selectedId && body.length) setSelectedId(body[0].id);
+      if (selectedId && !body.some((esc) => esc.id === selectedId)) setSelectedId(body[0]?.id || null);
     } catch (error) { setNotice(error.message); }
     finally { setLoading(false); }
   }
 
-  useEffect(() => { loadEscalations(); }, []);
+  useEffect(() => { loadEscalations(); }, [limit]);
 
   async function handleReview(event) {
     event.preventDefault();
@@ -552,7 +563,7 @@ function EscalationReviewPanel({ session }) {
           <h2><Gavel size={19} /> Escalation queue</h2>
           <p className="muted">Tickets requiring human approval before automated response or closure.</p>
         </div>
-        <span>{escalations.length} pending</span>
+        <span>{total ? `${escalations.length} of ${total} pending` : `${escalations.length} pending`}</span>
       </div>
       {notice && <div className="team-notice" role="status">{notice}</div>}
       <div className="review-grid">
@@ -586,6 +597,7 @@ function EscalationReviewPanel({ session }) {
               <span>All tickets are clear for automated handling.</span>
             </div>
           )}
+          {!loading && hasMore && <button className="show-more" onClick={() => setLimit((value) => value + 20)} disabled={loading}>{loading ? "Loading..." : `Load more (${escalations.length} of ${total})`}</button>}
         </div>
         <div className="review-detail-column">
           {selectedEscalation ? (
@@ -700,24 +712,33 @@ function AiDraftPanel({ session }) {
   const [notice, setNotice] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
+  const [limit, setLimit] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
 
   const selectedTicket = tickets.find((ticket) => ticket.id === selectedId) || null;
 
   async function loadTickets() {
     setLoading(true);
     try {
-      // Explicit limit: GET /tickets now defaults to 50 rows, and this panel
-      // still has no pagination of its own (#26), so ask for the maximum
-      // rather than silently inheriting the smaller default.
-      const result = await apiRequest("/tickets?limit=200", {}, session.access_token);
-      const draftable = result.filter((ticket) => ticket.status !== "closed");
+      // Paginated server-side. This panel used to fetch the whole collection
+      // and then throw away every closed ticket client-side.
+      const { body, headers } = await apiRequestWithMeta(
+        `/tickets?limit=${limit}`,
+        {},
+        session.access_token,
+      );
+      const draftable = body.filter((ticket) => ticket.status !== "closed");
       setTickets(draftable);
+      setTotal(Number(headers.get("X-Total-Count")) || draftable.length);
+      setHasMore(headers.get("X-Has-More") === "true");
       if (!selectedId && draftable.length) setSelectedId(draftable[0].id);
+      if (selectedId && !draftable.some((ticket) => ticket.id === selectedId)) setSelectedId(draftable[0]?.id || null);
     } catch (error) { setNotice(error.message); }
     finally { setLoading(false); }
   }
 
-  useEffect(() => { loadTickets(); }, []);
+  useEffect(() => { loadTickets(); }, [limit]);
 
   useEffect(() => { setDraft(null); setAutoResult(null); }, [selectedId]);
 
@@ -801,7 +822,7 @@ function AiDraftPanel({ session }) {
           <h2><Sparkles size={19} /> AI REPLY</h2>
           <p className="muted">Generate KB-grounded draft replies with citations, confidence scoring, and guardrail checks.</p>
         </div>
-        <span>{drafting ? "generating..." : `${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`}</span>
+        <span>{drafting ? "generating..." : total ? `${tickets.length} of ${total} ticket${total === 1 ? "" : "s"}` : `${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`}</span>
       </div>
       {notice && <div className="team-notice" role="status">{notice}</div>}
       <div className="review-grid">
@@ -833,6 +854,9 @@ function AiDraftPanel({ session }) {
               <span>Open or pending tickets will appear here.</span>
             </div>
           )}
+          {/* Rendered outside the empty branch so a page of closed tickets does
+              not strand the panel with no way to reach the next page. */}
+          {!loading && hasMore && <button className="show-more" onClick={() => setLimit((value) => value + 20)} disabled={loading}>{loading ? "Loading..." : `Load more (${tickets.length} of ${total})`}</button>}
         </div>
         <div className="review-detail-column">
           {selectedTicket ? (
