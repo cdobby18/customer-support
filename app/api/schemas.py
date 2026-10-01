@@ -291,6 +291,16 @@ class LogoutResponse(BaseModel):
     revoked: bool
 
 
+class RevokedSessionsResponse(BaseModel):
+    """Result of a per-user "revoke all sessions" call.
+
+    `revoked_at` is the cutoff: every token minted at or before it is now
+    rejected. None when the target user did not exist (admin path)."""
+
+    revoked: bool
+    revoked_at: datetime | None
+
+
 GUARDRAIL_HIT_INTERNAL_FIELDS = ("matched",)
 
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from app.core.models import RevokedTokenRecord
+from app.core.models import RevokedTokenRecord, UserRecord
 
 
 def is_token_revoked(db: Session, session_id: str) -> bool:
@@ -40,6 +40,27 @@ def revoke_token(
         )
     )
     return True
+
+
+def revoke_all_sessions(
+    db: Session,
+    *,
+    user_id: str,
+    revoked_at: datetime | None = None,
+) -> datetime | None:
+    """Invalidate every access token for one account.
+
+    Access tokens are stateless, so there is no list of live `jti`s to walk;
+    instead this records a cutoff on the user. `get_current_user` rejects a
+    token whose `iat` is at or before that instant. Returns the cutoff, or None
+    if the user does not exist. Does not commit; the caller owns the transaction.
+    """
+    user = db.get(UserRecord, user_id)
+    if user is None:
+        return None
+    cutoff = revoked_at or datetime.now(timezone.utc)
+    user.sessions_revoked_at = cutoff
+    return cutoff
 
 
 def purge_expired_revocations(db: Session) -> int:

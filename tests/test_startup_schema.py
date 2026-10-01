@@ -155,7 +155,7 @@ def test_startup_warns_when_schema_is_stale(tmp_path: Path) -> None:
 
     assert output[0] == "1", f"expected one warning, got {output[0]!r}"
     assert "0012_add_revoked_tokens" in output[1]
-    assert "0013_create_ticket_attachments" in output[1]
+    assert "0014_add_sessions_revoked_at" in output[1]
     assert "alembic upgrade head" in output[1]
 
 

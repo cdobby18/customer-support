@@ -23,6 +23,7 @@ from app.api.schemas import (
     FeedbackAnalytics,
     FeedbackDetail,
     LlmUsageSummary,
+    RevokedSessionsResponse,
     SlaBreakdown,
     SlaMetrics,
     StaffUserCreate,
@@ -45,6 +46,7 @@ from app.core.models import (
     UserRole,
 )
 from app.security.auth import hash_password
+from app.security.sessions import revoke_all_sessions
 
 AUDIT_LOG_RETENTION_DAYS = max(1, int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365")))
 
@@ -444,6 +446,37 @@ def update_user_status(
     db.commit()
     db.refresh(record)
     return to_user(record)
+
+
+@router.post(
+    "/admin/users/{user_id}/revoke-sessions",
+    response_model=RevokedSessionsResponse,
+)
+def revoke_user_sessions(
+    user_id: UUID,
+    current_admin: UserRecord = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RevokedSessionsResponse:
+    """Invalidate every session for a user. The support middle option.
+
+    No peer-admin guard, unlike deactivate/delete: forcing a re-login is not
+    destructive, and cutting off a compromised admin's sessions is exactly the
+    incident response this exists for.
+    """
+    record = db.get(UserRecord, str(user_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    cutoff = revoke_all_sessions(db, user_id=record.id)
+    add_audit_log(
+        db,
+        current_admin.id,
+        "auth.sessions_revoked",
+        "user",
+        record.id,
+        {"scope": "admin"},
+    )
+    db.commit()
+    return RevokedSessionsResponse(revoked=cutoff is not None, revoked_at=cutoff)
 
 
 @router.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

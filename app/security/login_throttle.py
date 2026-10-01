@@ -23,6 +23,7 @@ import time
 
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_LOCKOUT_SECONDS = 300
+DEFAULT_REGISTER_MAX_ATTEMPTS = 20
 
 _attempt_windows: dict[str, list[float]] = {}
 _window_lock = threading.Lock()
@@ -55,6 +56,49 @@ def login_lockout_seconds() -> int:
 
 def login_throttle_key(email: str, client_host: str) -> str:
     return f"{email.strip().lower()}|{client_host}"
+
+
+def max_registration_attempts() -> int:
+    try:
+        return int(os.getenv("AUTH_REGISTER_MAX_ATTEMPTS", str(DEFAULT_REGISTER_MAX_ATTEMPTS)))
+    except ValueError:
+        return DEFAULT_REGISTER_MAX_ATTEMPTS
+
+
+def registration_throttle_key(client_host: str) -> str:
+    # Prefixed so it cannot collide with a login key, which is `email|host`.
+    return f"register|{client_host}"
+
+
+def check_registration_allowed(key: str) -> None:
+    """Raise LoginThrottled when `key` has spent its registration budget.
+
+    Registration is an unauthenticated write path, so without this an attacker
+    can create accounts (and probe which emails already exist, since a duplicate
+    answers 409) as fast as the server accepts requests.
+    """
+    limit = max_registration_attempts()
+    if limit <= 0:
+        return
+    now = time.monotonic()
+    with _window_lock:
+        attempts = _pruned_attempts(key, now)
+        retry_after = _refresh_lockout(key, attempts, now)
+    if retry_after and len(attempts) >= limit:
+        raise LoginThrottled(retry_after, len(attempts))
+
+
+def record_registration_attempt(key: str) -> int:
+    """Add one attempt to `key`'s window. Returns the count afterwards."""
+    limit = max_registration_attempts()
+    if limit <= 0:
+        return 0
+    with _window_lock:
+        attempts = _pruned_attempts(key, time.monotonic())
+        attempts.append(time.monotonic())
+        attempts = attempts[-limit:]
+        _attempt_windows[key] = attempts
+    return len(attempts)
 
 
 def retry_after_seconds(key: str) -> int:

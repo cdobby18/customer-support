@@ -1,5 +1,6 @@
 """Registration, login, logout and current-user lookup."""
 
+import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from app.api.schemas import (
     LoginResponse,
     LogoutResponse,
     RegisterRequest,
+    RevokedSessionsResponse,
     UserResponse,
     add_audit_log,
     to_user,
@@ -28,12 +30,15 @@ from app.security.auth import (
 from app.security.login_throttle import (
     LoginThrottled,
     check_login_allowed,
+    check_registration_allowed,
     clear_login_failures,
     login_throttle_key,
     max_login_attempts,
     record_login_failure,
+    record_registration_attempt,
+    registration_throttle_key,
 )
-from app.security.sessions import revoke_token
+from app.security.sessions import revoke_all_sessions, revoke_token
 
 router = APIRouter()
 
@@ -42,8 +47,38 @@ def client_host(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def registration_enabled() -> bool:
+    """Public self-service registration can be switched off for locked-down deploys."""
+    return os.getenv("AUTH_REGISTRATION_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
 @router.post("/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register_user(user_data: RegisterRequest, db: Session = Depends(get_db)) -> UserResponse:
+def register_user(
+    user_data: RegisterRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> UserResponse:
+    if not registration_enabled():
+        raise HTTPException(status_code=403, detail="Public registration is disabled")
+
+    # Unauthenticated write path: throttle per client host before doing any
+    # work, so account creation and the duplicate-email probe cannot be run at
+    # request speed.
+    throttle_key = registration_throttle_key(client_host(request))
+    try:
+        check_registration_allowed(throttle_key)
+    except LoginThrottled as throttled:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many registration attempts. Try again later.",
+            headers={"Retry-After": str(throttled.retry_after)},
+        ) from None
+    record_registration_attempt(throttle_key)
+
     normalized_email = str(user_data.email).lower()
     existing_user = db.scalar(select(UserRecord).where(UserRecord.email == normalized_email))
     if existing_user is not None:
@@ -122,6 +157,30 @@ def logout_user(
     add_audit_log(db, claims.user_id, "auth.logout", "user", claims.user_id, {"revoked": revoked})
     db.commit()
     return LogoutResponse(revoked=revoked)
+
+
+@router.post("/auth/revoke-all-sessions", response_model=RevokedSessionsResponse)
+def revoke_own_sessions(
+    claims: TokenClaims = Depends(read_token_claims),
+    db: Session = Depends(get_db),
+) -> RevokedSessionsResponse:
+    """Log this account out everywhere.
+
+    Logout revokes one `jti`; this sets a cutoff that also kills sessions this
+    process never issued a revocation row for. The token used to call it is
+    itself minted at or before the cutoff, so it stops working too.
+    """
+    cutoff = revoke_all_sessions(db, user_id=claims.user_id)
+    add_audit_log(
+        db,
+        claims.user_id,
+        "auth.sessions_revoked",
+        "user",
+        claims.user_id,
+        {"scope": "self"},
+    )
+    db.commit()
+    return RevokedSessionsResponse(revoked=cutoff is not None, revoked_at=cutoff)
 
 
 @router.get("/auth/me", response_model=UserResponse)

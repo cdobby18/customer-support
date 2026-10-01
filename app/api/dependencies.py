@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.agents.support import as_utc
 from app.core.database import get_db
 from app.core.models import UserRecord, UserRole
 from app.security.auth import TokenClaims, decode_access_token
@@ -41,6 +42,12 @@ def get_current_user(
     user = db.get(UserRecord, claims.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="Authentication required")
+    if user.sessions_revoked_at is not None and claims.issued_at <= as_utc(
+        user.sessions_revoked_at
+    ):
+        # "Revoke all sessions" sets a cutoff: every token minted at or before
+        # it is dead, including ones this process never saw revoked.
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     return user
 
 

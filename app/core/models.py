@@ -22,6 +22,12 @@ class UserRecord(Base):
     role: Mapped[str] = mapped_column(String(20), default=UserRole.customer.value)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Every token minted at or before this instant is rejected. Revoking one
+    # session records its `jti`; this is the middle option that kills every
+    # session for one account without deactivating the account itself.
+    sessions_revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class AuditLogRecord(Base):
