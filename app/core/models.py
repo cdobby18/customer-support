@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -64,12 +64,23 @@ class TicketRecord(Base):
     intake_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     guardrail_status: Mapped[str] = mapped_column(String(20), default="clean", index=True)
     guardrail_hits: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     risk_level: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     escalation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     escalation_route: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Composite rather than per-column: external-id dedup and thread continuation
+    # both filter on channel *and* the id together (see
+    # `find_ticket_by_external_id` / `find_open_thread_ticket` in
+    # app/api/routers/webhooks.py), so a single-column index cannot serve either.
+    # Names must match revision 0010 so `create_all` and `alembic upgrade head`
+    # produce the same schema.
+    __table_args__ = (
+        Index("ix_tickets_channel_external_id", "channel", "external_id"),
+        Index("ix_tickets_channel_thread_id", "channel", "thread_id"),
+    )
 
 
 class TicketCommentRecord(Base):
@@ -80,8 +91,16 @@ class TicketCommentRecord(Base):
     author_id: Mapped[str] = mapped_column(String(255))
     body: Mapped[str] = mapped_column(Text)
     is_internal: Mapped[bool] = mapped_column(Boolean, default=False)
-    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    # Comment dedup (`find_comment_by_external_id`) filters on external_id alone,
+    # so this index is single-column. The name comes from revision 0010 and is
+    # misleading, but renaming it would need a migration to keep both schemas
+    # in step.
+    __table_args__ = (
+        Index("ix_ticket_comments_channel_external_id", "external_id"),
+    )
 
 
 class FeedbackRecord(Base):

@@ -382,7 +382,7 @@ jobs:
           tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
           required = {
               "users", "tickets", "ticket_comments", "audit_logs",
-              "feedback", "revoked_tokens",
+              "feedback", "revoked_tokens", "ticket_attachments",
           }
           missing = required - tables
           if missing:
