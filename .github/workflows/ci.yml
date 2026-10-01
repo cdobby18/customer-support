@@ -391,8 +391,12 @@ jobs:
           PY
 
       - name: Start the notification receiver
+        env:
+          # Passed to the receiver as well as the producers, so this job verifies
+          # the real HMAC path instead of only proving a POST happened.
+          NOTIFY_WEBHOOK_SECRET: ci-only-not-a-real-secret
         run: |
-          nohup python scripts/notify_receiver.py 8099 > /tmp/receiver.log 2>&1 &
+          nohup python scripts/notify_receiver.py 8099 "$NOTIFY_WEBHOOK_SECRET" > /tmp/receiver.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8099/health > /dev/null; then
               echo "receiver up after ${i}s"
@@ -411,6 +415,7 @@ jobs:
         env:
           CELERY_TASK_ALWAYS_EAGER: '0'
           NOTIFY_WEBHOOK_URL: http://127.0.0.1:8099/hook
+          NOTIFY_WEBHOOK_SECRET: ci-only-not-a-real-secret
         run: |
           nohup celery -A app.core.workers worker \
             --loglevel=debug --pool=solo > /tmp/worker.log 2>&1 &
@@ -440,6 +445,7 @@ jobs:
           JWT_SECRET: ci-only-not-a-real-secret
           CHANNEL_WEBHOOK_SECRET: ci-only-not-a-real-secret
           NOTIFY_WEBHOOK_URL: http://127.0.0.1:8099/hook
+          NOTIFY_WEBHOOK_SECRET: ci-only-not-a-real-secret
         run: |
           nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 \
             > /tmp/api.log 2>&1 &
@@ -458,6 +464,7 @@ jobs:
           DATABASE_URL: postgresql+psycopg://support:support@127.0.0.1:5432/support_deploy
           CELERY_TASK_ALWAYS_EAGER: '0'
           NOTIFY_WEBHOOK_URL: http://127.0.0.1:8099/hook
+          NOTIFY_WEBHOOK_SECRET: ci-only-not-a-real-secret
         run: python scripts/e2e_postgres_worker.py --worker-log /tmp/worker.log
 
       - name: Dump logs

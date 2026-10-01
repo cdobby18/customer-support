@@ -276,8 +276,9 @@ $env:DATABASE_URL="postgresql+psycopg://user:pass@localhost:5432/support"
 $env:REDIS_URL="redis://localhost:6379/0"
 $env:CELERY_TASK_ALWAYS_EAGER="0"
 $env:NOTIFY_WEBHOOK_URL="http://127.0.0.1:8099/hook"
+$env:NOTIFY_WEBHOOK_SECRET="my-signing-secret"
 
-.\.venv\Scripts\python.exe scripts\notify_receiver.py 8099
+.\.venv\Scripts\python.exe scripts\notify_receiver.py 8099 my-signing-secret
 .\.venv\Scripts\python.exe -m celery -A app.core.workers worker --loglevel=debug --pool=solo
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
 .\.venv\Scripts\python.exe scripts\e2e_postgres_worker.py --worker-log worker.log
