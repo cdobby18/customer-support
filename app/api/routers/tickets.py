@@ -421,17 +421,33 @@ def delete_ticket(
             select(TicketCommentRecord.id).where(TicketCommentRecord.ticket_id == str(ticket_id))
         ).all()
     )
+    attachments = db.scalars(
+        select(TicketAttachmentRecord).where(
+            TicketAttachmentRecord.ticket_id == str(ticket_id)
+        )
+    ).all()
+    storage_paths = [row.storage_path for row in attachments]
+
     add_audit_log(
         db,
         current_user.id,
         "ticket.deleted",
         "ticket",
         record.id,
-        {"message": record.message, "comments_removed": comment_count},
+        {
+            "message": record.message,
+            "comments_removed": comment_count,
+            "attachments_removed": len(attachments),
+        },
     )
+    db.execute(delete(TicketAttachmentRecord).where(TicketAttachmentRecord.ticket_id == str(ticket_id)))
     db.execute(delete(TicketCommentRecord).where(TicketCommentRecord.ticket_id == str(ticket_id)))
     db.delete(record)
     db.commit()
+    # After the commit, so a rollback cannot leave rows pointing at deleted bytes.
+    # Attachment bytes are customer PII: deleting the row without the file left
+    # them on disk indefinitely, and nothing else ever reached them.
+    removed_files = _remove_attachment_files(storage_paths)
 
 
 
@@ -525,10 +541,122 @@ def _upload_dir() -> str:
     return path
 
 
+def _remove_attachment_files(storage_paths: list[str]) -> int:
+    """Delete stored bytes, returning how many were actually removed.
+
+    storage_path is a bare uuid4 written by this module rather than anything
+    client-supplied, but the join is still resolved and checked against the
+    upload directory so a corrupted row cannot delete something outside it.
+    """
+    root = os.path.realpath(_upload_dir())
+    removed = 0
+    for storage_path in storage_paths:
+        candidate = os.path.realpath(os.path.join(root, storage_path))
+        if os.path.dirname(candidate) != root:
+            continue
+        try:
+            os.remove(candidate)
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # A file we cannot delete must not fail the request: the rows are
+            # already gone, and the alternative is a deleted ticket that looks
+            # like it failed.
+            continue
+    return removed
+
+
 def _safe_filename(filename: str) -> str:
     base = Path(filename).name.strip()
     base = re.sub(r"[^\w.\- ]", "_", base)
     return base[:120] or "file"
+
+
+# Attachments are served back with a caller-influenced Content-Type and an
+# attachment disposition, so a file that a browser would treat as active content
+# is stored and replayed verbatim. Restrict uploads to types we are willing to
+# serve, and confirm the bytes actually match the declared type before writing
+# anything to disk.
+ALLOWED_ATTACHMENT_TYPES = {
+    "application/pdf": (b"%PDF-",),
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+    "image/webp": (b"RIFF",),
+    "text/plain": None,  # no magic bytes; the browser renders it as inert text
+    "text/csv": None,
+    "text/markdown": None,
+    "application/json": None,
+}
+
+# Bytes that make a file dangerous regardless of the extension a client claims:
+# an HTML tag, a script tag, or a PDF-style JavaScript action. Checked against the
+# payload because content_type is attacker-supplied and easy to set to text/plain.
+ACTIVE_CONTENT_MARKERS = (
+    b"<script",
+    b"<html",
+    b"<iframe",
+    b"<svg",
+    b"javascript:",
+    b"/javascript",
+    b"<?php",
+)
+
+
+def _sniffed_content_type(payload: bytes) -> str | None:
+    for content_type, magics in ALLOWED_ATTACHMENT_TYPES.items():
+        if magics is None:
+            continue
+        if payload.startswith(magics):
+            return content_type
+    return None
+
+
+def _looks_like_active_content(payload: bytes) -> bool:
+    head = payload[:4096].lower()
+    return any(marker in head for marker in ACTIVE_CONTENT_MARKERS)
+
+
+def validate_attachment_payload(
+    filename: str,
+    declared_type: str | None,
+    payload: bytes,
+) -> str:
+    """Return the content type to store, or explain why the file is refused.
+
+    The declared type comes from the client, so it is treated as a hint and
+    confirmed against the bytes. Storing the sniffed type rather than the
+    declared one is what stops a `.html` upload announced as `text/plain` from
+    being served back as HTML to the next person who opens the ticket.
+    """
+    normalized = (declared_type or "").split(";")[0].strip().lower()
+    if normalized not in ALLOWED_ATTACHMENT_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_ATTACHMENT_TYPES))
+        raise HTTPException(
+            status_code=415,
+            detail=f"{filename}: {normalized or 'unknown'} type is not allowed (allowed: {allowed})",
+        )
+    if _looks_like_active_content(payload):
+        raise HTTPException(
+            status_code=415,
+            detail=f"{filename}: content looks like active markup and is not allowed",
+        )
+    sniffed = _sniffed_content_type(payload)
+    if sniffed is not None:
+        if normalized in {"text/plain", "text/markdown", "text/csv", "application/json"}:
+            # Text-like types carry no magic bytes, so only refuse when the bytes
+            # are unambiguously another allowed binary type (a PDF renamed .txt).
+            pass
+        elif normalized != sniffed:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"{filename}: content is {sniffed}, not the declared {normalized}"
+                ),
+            )
+        return sniffed
+    return normalized
 
 
 @router.post(
@@ -556,26 +684,33 @@ def upload_attachments(
     if len(existing) + len(files) > max_files:
         raise HTTPException(status_code=400, detail=f"Ticket already has {len(existing)} attachments")
     created: list[TicketAttachment] = []
+    staged: list[tuple[TicketAttachmentRecord, bytes]] = []
+    # Validate every file before writing any of them: a rejection halfway through
+    # would otherwise leave orphaned bytes on disk with no row pointing at them.
     for request_file in files:
-        payload = request_file.file.read()
+        display_name = request_file.filename or "file"
+        # Read one byte past the limit so an oversized file is detected without
+        # buffering all of it into memory.
+        payload = request_file.file.read(max_bytes + 1)
         request_file.file.close()
         if len(payload) > max_bytes:
-            raise HTTPException(status_code=413, detail=f"{request_file.filename} exceeds the {max_bytes // (1024 * 1024)}MB limit")
+            raise HTTPException(status_code=413, detail=f"{display_name} exceeds the {max_bytes // (1024 * 1024)}MB limit")
         if len(payload) == 0:
-            raise HTTPException(status_code=400, detail=f"{request_file.filename} is empty")
+            raise HTTPException(status_code=400, detail=f"{display_name} is empty")
+        stored_type = validate_attachment_payload(
+            display_name, request_file.content_type, payload
+        )
         record = TicketAttachmentRecord(
             id=str(uuid4()),
             ticket_id=str(ticket_id),
             filename=_safe_filename(request_file.filename or ""),
-            content_type=request_file.content_type,
+            content_type=stored_type,
             size=len(payload),
             storage_path=str(uuid4()),
             uploaded_by=current_user.id,
             created_at=datetime.now(timezone.utc),
         )
-        with open(os.path.join(_upload_dir(), record.storage_path), "wb") as handle:
-            handle.write(payload)
-        db.add(record)
+        staged.append((record, payload))
         created.append(
             TicketAttachment(
                 id=UUID(record.id),
@@ -587,6 +722,10 @@ def upload_attachments(
                 created_at=record.created_at,
             )
         )
+    for record, payload in staged:
+        with open(os.path.join(_upload_dir(), record.storage_path), "wb") as handle:
+            handle.write(payload)
+        db.add(record)
     db.commit()
     return created
 
@@ -647,7 +786,14 @@ def download_attachment(
     return Response(
         content=content,
         media_type=record.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{record.filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{record.filename}"',
+            # Defence in depth: rows written before the upload allowlist existed
+            # can still carry an HTML content_type, and the browser decides what
+            # to do with it, not us.
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
