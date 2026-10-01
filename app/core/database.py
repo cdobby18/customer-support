@@ -5,6 +5,7 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 # Read once at import, alongside the other process-wide settings, and used by
@@ -54,10 +55,16 @@ def alembic_head_revision() -> str | None:
         return None
 
 
-def current_schema_revision() -> str | None:
-    """The revision recorded in the connected database, or None if unversioned."""
+def current_schema_revision(bind: Engine | None = None) -> str | None:
+    """The revision recorded in the connected database, or None if unversioned.
+
+    `bind` defaults to the process engine. It is a parameter so a caller holding
+    a different engine (the test harness overrides the session, not this module)
+    can ask about the database it actually talks to.
+    """
+    target = bind or engine
     try:
-        with engine.connect() as connection:
+        with target.connect() as connection:
             if "alembic_version" not in inspect(connection).get_table_names():
                 return None
             return connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
@@ -65,10 +72,10 @@ def current_schema_revision() -> str | None:
         return None
 
 
-def schema_is_current() -> bool:
+def schema_is_current(bind: Engine | None = None) -> bool:
     """Whether the database is at the migration chain's head revision."""
     head = alembic_head_revision()
-    return head is not None and current_schema_revision() == head
+    return head is not None and current_schema_revision(bind) == head
 
 
 def _project_root() -> Path:

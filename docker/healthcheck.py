@@ -10,7 +10,10 @@ Exit 0 = healthy, exit 1 = unhealthy. A refused connection is the expected
 unhealthy case, so it is caught rather than left to print a traceback on every
 failed probe. /health is a static route that answers without touching the
 database, so an unhealthy verdict means the process is unwell, not that
-PostgreSQL is briefly unreachable.
+PostgreSQL is briefly unreachable. A replica with an unreachable database or an
+unapplied migration is not "sick" in the restart sense; that is what GET /ready
+is for. Point orchestration readiness and load-balancer probes at /ready and
+leave this container probe on /health.
 """
 
 import sys

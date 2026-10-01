@@ -31,6 +31,31 @@ celery_app.conf.update(
 )
 
 
+def broker_check_required() -> bool:
+    """Whether readiness has to reach the broker.
+
+    In eager mode tasks run in-process, so a replica whose Redis is down can
+    still serve every request; failing its readiness would take a working API
+    out of rotation. A real worker deployment does need the broker, and a
+    replica that cannot enqueue a notification has no business taking traffic.
+    """
+    return not TASK_ALWAYS_EAGER
+
+
+def broker_is_reachable(timeout: float = 1.0) -> bool:
+    """Open and drop a broker connection. Never raises.
+
+    A probe that throws turns a "not ready" into a 500, which an orchestrator
+    reads as the same thing but is far harder to debug from the logs.
+    """
+    try:
+        with celery_app.connection_for_write() as connection:
+            connection.ensure_connection(max_retries=0, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def notify_webhook_url() -> str:
     return os.getenv("NOTIFY_WEBHOOK_URL", "").strip()
 
