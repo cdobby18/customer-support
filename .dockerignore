@@ -45,7 +45,7 @@ frontend
 # Markdown/task notes
 markdowns
 README.md
-REMAINING_TASKS.md
+FUTURE_TASKS.md
 
 # Generated at runtime or by tests.
 data/embeddings
