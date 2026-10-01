@@ -512,10 +512,11 @@ function EscalationReviewPanel({ session }) {
   async function loadEscalations() {
     setLoading(true);
     try {
-      const result = await apiRequest("/tickets", {}, session.access_token);
-      const pendingReview = result.filter((ticket) => ticket.escalation_status === "pending");
-      setEscalations(pendingReview);
-      if (!selectedId && pendingReview.length) setSelectedId(pendingReview[0].id);
+      // Filtered server-side: the escalation queue used to fetch every ticket
+      // in the table and pick the pending ones out client-side.
+      const result = await apiRequest("/tickets?escalation_status=pending&limit=200", {}, session.access_token);
+      setEscalations(result);
+      if (!selectedId && result.length) setSelectedId(result[0].id);
     } catch (error) { setNotice(error.message); }
     finally { setLoading(false); }
   }
@@ -705,7 +706,10 @@ function AiDraftPanel({ session }) {
   async function loadTickets() {
     setLoading(true);
     try {
-      const result = await apiRequest("/tickets", {}, session.access_token);
+      // Explicit limit: GET /tickets now defaults to 50 rows, and this panel
+      // still has no pagination of its own (#26), so ask for the maximum
+      // rather than silently inheriting the smaller default.
+      const result = await apiRequest("/tickets?limit=200", {}, session.access_token);
       const draftable = result.filter((ticket) => ticket.status !== "closed");
       setTickets(draftable);
       if (!selectedId && draftable.length) setSelectedId(draftable[0].id);

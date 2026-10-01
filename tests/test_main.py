@@ -66,6 +66,11 @@ def test_ticket_can_be_retrieved() -> None:
 
 
 def test_ticket_can_be_assigned_and_moved_through_lifecycle() -> None:
+    agent = client.post(
+        "/admin/users",
+        headers=admin_headers(),
+        json={"email": "assignee@example.com", "password": "correct horse battery", "role": "agent"},
+    ).json()
     created = client.post(
         "/tickets",
         headers=admin_headers(),
@@ -75,12 +80,108 @@ def test_ticket_can_be_assigned_and_moved_through_lifecycle() -> None:
     response = client.patch(
         f"/tickets/{created['id']}",
         headers=admin_headers(),
-        json={"status": "in_progress", "assignee_id": "agent-1"},
+        json={"status": "in_progress", "assignee_id": agent["id"]},
     )
 
     assert response.status_code == 200
     assert response.json()["status"] == "in_progress"
-    assert response.json()["assignee_id"] == "agent-1"
+    assert response.json()["assignee_id"] == agent["id"]
+
+
+def test_ticket_can_be_unassigned() -> None:
+    agent = client.post(
+        "/admin/users",
+        headers=admin_headers(),
+        json={"email": "unassign@example.com", "password": "correct horse battery", "role": "agent"},
+    ).json()
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-3", "message": "Assign then unassign me"},
+    ).json()
+    client.patch(
+        f"/tickets/{created['id']}",
+        headers=admin_headers(),
+        json={"assignee_id": agent["id"]},
+    )
+
+    response = client.patch(
+        f"/tickets/{created['id']}",
+        headers=admin_headers(),
+        json={"assignee_id": None},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["assignee_id"] is None
+
+
+def test_ticket_update_rejects_an_assignee_that_does_not_exist() -> None:
+    """An unchecked typo became a phantom assignee in the workload report."""
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-3", "message": "Nobody owns this"},
+    ).json()
+
+    response = client.patch(
+        f"/tickets/{created['id']}",
+        headers=admin_headers(),
+        json={"assignee_id": "agent-does-not-exist"},
+    )
+
+    assert response.status_code == 404
+    assert "Assignee not found" in response.json()["detail"]
+    assert client.get(
+        f"/tickets/{created['id']}", headers=admin_headers()
+    ).json()["assignee_id"] is None
+
+
+def test_ticket_update_rejects_a_customer_as_assignee() -> None:
+    customer = client.post(
+        "/auth/register",
+        json={"email": "assignee-customer@example.com", "password": "correct horse battery"},
+    ).json()
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-3", "message": "Assign me to a customer"},
+    ).json()
+
+    response = client.patch(
+        f"/tickets/{created['id']}",
+        headers=admin_headers(),
+        json={"assignee_id": customer["id"]},
+    )
+
+    assert response.status_code == 400
+    assert "only be assigned to staff" in response.json()["detail"]
+
+
+def test_ticket_update_rejects_a_deactivated_assignee() -> None:
+    agent = client.post(
+        "/admin/users",
+        headers=admin_headers(),
+        json={"email": "gone@example.com", "password": "correct horse battery", "role": "agent"},
+    ).json()
+    created = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-3", "message": "Assign me then deactivate"},
+    ).json()
+    client.patch(
+        f"/admin/users/{agent['id']}",
+        headers=admin_headers(),
+        json={"is_active": False},
+    )
+
+    response = client.patch(
+        f"/tickets/{created['id']}",
+        headers=admin_headers(),
+        json={"assignee_id": agent["id"]},
+    )
+
+    assert response.status_code == 400
+    assert "not an active user" in response.json()["detail"]
 
 
 def test_ticket_comments_are_stored_and_listed() -> None:
@@ -174,6 +275,88 @@ def test_tickets_can_be_filtered_by_status() -> None:
 
     assert response.status_code == 200
     assert all(ticket["status"] == "pending" for ticket in response.json())
+
+
+def test_tickets_can_be_filtered_by_escalation_status() -> None:
+    """The escalation panel used to download every ticket to find these."""
+    escalated = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-5", "message": "I was charged twice"},
+    ).json()
+    client.patch(
+        f"/tickets/{escalated['id']}/escalation",
+        headers=admin_headers(),
+        json={"status": "pending", "reason": "Billing review"},
+    )
+    plain = client.post(
+        "/tickets",
+        headers=admin_headers(),
+        json={"customer_id": "customer-5", "message": "What time do you open?"},
+    ).json()
+
+    response = client.get(
+        "/tickets", headers=admin_headers(), params={"escalation_status": "pending"}
+    )
+
+    assert response.status_code == 200
+    ids = [ticket["id"] for ticket in response.json()]
+    assert escalated["id"] in ids
+    assert plain["id"] not in ids
+
+
+def test_ticket_list_rejects_an_unknown_escalation_status() -> None:
+    response = client.get(
+        "/tickets", headers=admin_headers(), params={"escalation_status": "nonsense"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_ticket_list_is_bounded_without_an_explicit_limit() -> None:
+    """Omitting `limit` used to mean the whole table plus a count(*)."""
+    total = 55
+    for index in range(total):
+        client.post(
+            "/tickets",
+            headers=admin_headers(),
+            json={"customer_id": f"bulk-{index}", "message": f"Bulk ticket {index}"},
+        )
+
+    response = client.get("/tickets", headers=admin_headers())
+
+    assert response.status_code == 200
+    assert len(response.json()) == 50
+    assert response.headers["X-Total-Count"] == str(total)
+    assert response.headers["X-Has-More"] == "true"
+
+
+def test_ticket_list_limit_is_capped() -> None:
+    for index in range(5):
+        client.post(
+            "/tickets",
+            headers=admin_headers(),
+            json={"customer_id": f"cap-{index}", "message": f"Cap ticket {index}"},
+        )
+
+    response = client.get("/tickets", headers=admin_headers(), params={"limit": 5000})
+
+    assert response.status_code == 422
+
+
+def test_ticket_list_pages_with_offset() -> None:
+    for index in range(4):
+        client.post(
+            "/tickets",
+            headers=admin_headers(),
+            json={"customer_id": f"page-{index}", "message": f"Page ticket {index}"},
+        )
+
+    first = client.get("/tickets", headers=admin_headers(), params={"limit": 2, "offset": 0})
+    second = client.get("/tickets", headers=admin_headers(), params={"limit": 2, "offset": 2})
+
+    assert [t["id"] for t in first.json()] != [t["id"] for t in second.json()]
+    assert first.headers["X-Has-More"] == "true"
 
 
 def test_user_roles_are_stored_with_authentication_ready_fields() -> None:

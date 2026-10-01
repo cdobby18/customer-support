@@ -56,8 +56,33 @@ from app.core.models import (
     TicketCommentRecord,
     TicketRecord,
     UserRecord,
+    UserRole,
 )
 from app.core.workers import enqueue_notification
+
+
+DEFAULT_TICKET_LIMIT = 50
+MAX_TICKET_LIMIT = 200
+
+
+def _validated_assignee_id(db: Session, assignee_id: str | None) -> str | None:
+    """Resolve an assignee reference, or explain why it cannot be one.
+
+    `assignee_id` is a bare string on the ticket, and the admin workload report
+    buckets tickets by it, so an unchecked typo becomes a phantom assignee that
+    shows up as a column of work owned by nobody. `None` is allowed and means
+    unassigned.
+    """
+    if assignee_id is None:
+        return None
+    assignee = db.get(UserRecord, assignee_id)
+    if assignee is None:
+        raise HTTPException(status_code=404, detail="Assignee not found")
+    if not assignee.is_active:
+        raise HTTPException(status_code=400, detail="Assignee is not an active user")
+    if assignee.role not in {UserRole.agent.value, UserRole.admin.value}:
+        raise HTTPException(status_code=400, detail="Tickets can only be assigned to staff")
+    return assignee.id
 
 
 def ensure_ticket_access(ticket: TicketRecord, user: UserRecord) -> None:
@@ -267,9 +292,10 @@ def update_escalation(
 def list_tickets(
     response: Response,
     ticket_status: TicketStatus | None = Query(default=None, alias="status"),
+    escalation_status: EscalationStatus | None = Query(default=None),
     customer_id: str | None = None,
     q: str | None = None,
-    limit: int | None = Query(default=None, ge=1, le=200),
+    limit: int = Query(default=DEFAULT_TICKET_LIMIT, ge=1, le=MAX_TICKET_LIMIT),
     offset: int = Query(default=0, ge=0),
     current_user: UserRecord = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -285,6 +311,11 @@ def list_tickets(
         customer_id = current_user.id
     if ticket_status is not None:
         query = query.where(TicketRecord.status == ticket_status.value)
+    if escalation_status is not None:
+        # Server-side so the escalation panel can ask for exactly the rows it
+        # draws. Filtering client-side meant downloading every ticket in the
+        # table to display the handful awaiting review.
+        query = query.where(TicketRecord.escalation_status == escalation_status.value)
     if customer_id is not None:
         query = query.where(TicketRecord.customer_id == customer_id)
     if q:
@@ -300,8 +331,7 @@ def list_tickets(
             )
         )
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    if limit is not None:
-        query = query.offset(offset).limit(limit)
+    query = query.offset(offset).limit(limit)
     records = db.scalars(query).all()
     stats = build_ticket_stats(db, records)
     response.headers["X-Total-Count"] = str(total)
@@ -350,7 +380,7 @@ def update_ticket(
         if record.status in {TicketStatus.resolved.value, TicketStatus.closed.value}:
             record.resolved_at = datetime.now(timezone.utc)
     if "assignee_id" in updated_fields:
-        record.assignee_id = updated_fields["assignee_id"]
+        record.assignee_id = _validated_assignee_id(db, updated_fields["assignee_id"])
     add_audit_log(
         db,
         current_user.id,
