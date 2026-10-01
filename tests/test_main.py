@@ -948,6 +948,56 @@ def test_feedback_analytics_reports_rating_response_and_deflection_rates() -> No
     assert analytics.json()["deflection_rate"] == 0.3333
 
 
+def test_ai_resolved_tickets_count_as_deflected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: `run_auto_response` sets `first_response_at` on its own reply.
+
+    The old metric treated any ticket with `first_response_at` as manually
+    handled, so a fully AI-resolved ticket reported a 0.0 deflection rate and
+    the KPI could never be anything but zero.
+    """
+    _fixed_kb(monkeypatch, [_kb_match()])
+    created = _create_ticket("My application crashes when I try to export a report")
+
+    response = client.post(
+        f"/tickets/{created['id']}/auto-respond",
+        headers=admin_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["action"] == "auto_sent"
+
+    ticket = client.get(f"/tickets/{created['id']}", headers=admin_headers()).json()
+    assert ticket["resolved_at"] is not None
+    assert ticket["first_response_at"] is not None
+
+    analytics = client.get("/admin/analytics/feedback", headers=admin_headers())
+    assert analytics.status_code == 200
+    assert analytics.json()["deflection_rate"] == 1.0
+
+    dashboard = client.get("/admin/analytics/dashboard", headers=admin_headers())
+    assert dashboard.status_code == 200
+    assert dashboard.json()["csat"]["deflection_rate"] == 1.0
+
+
+def test_ai_resolved_draft_is_grounded_not_the_customer_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The auto-response posts the draft publicly, so it must not be an echo."""
+    _fixed_kb(monkeypatch, [_kb_match()])
+    created = _create_ticket("My application crashes when I try to export a report")
+
+    response = client.post(
+        f"/tickets/{created['id']}/auto-respond",
+        headers=admin_headers(),
+    )
+    assert response.status_code == 200
+    draft = response.json()["draft"]["draft"]
+
+    assert draft
+    assert draft != created["message"]
+    assert created["message"] not in draft
+    assert response.json()["draft"]["citations"]
+
+
 def test_non_admin_cannot_read_feedback_analytics() -> None:
     _, headers = make_customer()
 

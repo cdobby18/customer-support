@@ -14,6 +14,7 @@ from app.agents.llm import get_llm_usage_summary, reset_llm_usage
 from app.agents.support import as_utc
 from app.api.dependencies import require_admin
 from app.api.schemas import (
+    AI_ASSISTANT_ID,
     AuditLogResponse,
     ConfidenceHistogram,
     DashboardAnalytics,
@@ -38,6 +39,7 @@ from app.core.database import get_db
 from app.core.models import (
     AuditLogRecord,
     FeedbackRecord,
+    TicketCommentRecord,
     TicketRecord,
     UserRecord,
     UserRole,
@@ -164,6 +166,49 @@ def sla_metrics(
     )
 
 
+def _classify_resolutions(
+    db: Session, records: list[TicketRecord]
+) -> tuple[set[str], set[str]]:
+    """Split resolved tickets into `resolved` and `deflected` id sets.
+
+    Deflection means the ticket was resolved without staff effort. The previous
+    definition keyed off `first_response_at`, which `run_auto_response` sets on
+    the AI's own reply, so every AI-resolved ticket counted as manually handled
+    and the rate was structurally always 0.0.
+
+    Staff effort is a public reply from anyone other than the AI or the ticket's
+    own customer, a recorded reviewer, or an approved/rejected escalation. A
+    customer's follow-up is not staff effort, so it does not disqualify
+    deflection.
+    """
+    resolved = [record for record in records if record.resolved_at is not None]
+    resolved_ids = {record.id for record in resolved}
+    if not resolved_ids:
+        return set(), set()
+
+    customer_of = {record.id: record.customer_id for record in resolved}
+    staff_replied = {
+        comment.ticket_id
+        for comment in db.scalars(
+            select(TicketCommentRecord).where(
+                TicketCommentRecord.ticket_id.in_(resolved_ids),
+                TicketCommentRecord.is_internal.is_(False),
+            )
+        ).all()
+        if comment.author_id != AI_ASSISTANT_ID
+        and comment.author_id != customer_of.get(comment.ticket_id)
+    }
+
+    human_reviewed = {
+        record.id
+        for record in resolved
+        if record.reviewed_by is not None
+        or record.escalation_status
+        in {EscalationStatus.approved.value, EscalationStatus.rejected.value}
+    }
+    return resolved_ids, resolved_ids - staff_replied - human_reviewed
+
+
 @router.get("/admin/analytics/feedback", response_model=FeedbackAnalytics)
 def feedback_analytics(
     _: UserRecord = Depends(require_admin),
@@ -173,18 +218,8 @@ def feedback_analytics(
     feedback_records = db.scalars(select(FeedbackRecord)).all()
 
     ratings = [feedback.rating for feedback in feedback_records]
-    resolved_tickets = [record for record in records if record.resolved_at is not None]
-    resolved_ids = {record.id for record in resolved_tickets}
-
-    manually_handled_ids = {
-        record.id
-        for record in records
-        if record.reviewed_by is not None
-        or record.escalation_status
-        in {EscalationStatus.approved.value, EscalationStatus.rejected.value}
-        or record.first_response_at is not None
-    }
-    resolved_count = len(resolved_tickets)
+    resolved_ids, deflected_ids = _classify_resolutions(db, records)
+    resolved_count = len(resolved_ids)
 
     return FeedbackAnalytics(
         total_feedback=len(feedback_records),
@@ -196,9 +231,7 @@ def feedback_analytics(
             round(len(feedback_records) / resolved_count, 4) if resolved_count else None
         ),
         deflection_rate=(
-            round((resolved_count - len(resolved_ids & manually_handled_ids)) / resolved_count, 4)
-            if resolved_count
-            else None
+            round(len(deflected_ids) / resolved_count, 4) if resolved_count else None
         ),
     )
 
@@ -255,16 +288,8 @@ def analytics_dashboard(
     ]
 
     ratings = [feedback.rating for feedback in feedback_records]
-    resolved_ids = {record.id for record in resolved_records}
-    manually_handled_ids = {
-        record.id
-        for record in records
-        if record.reviewed_by is not None
-        or record.escalation_status
-        in {EscalationStatus.approved.value, EscalationStatus.rejected.value}
-        or record.first_response_at is not None
-    }
-    resolved_count = len(resolved_records)
+    resolved_ids, deflected_ids = _classify_resolutions(db, records)
+    resolved_count = len(resolved_ids)
 
     escalated_records = [
         record for record in records if record.escalation_status != EscalationStatus.none.value
@@ -337,7 +362,7 @@ def analytics_dashboard(
                 round(len(feedback_records) / resolved_count, 4) if resolved_count else None
             ),
             deflection_rate=(
-                round((resolved_count - len(resolved_ids & manually_handled_ids)) / resolved_count, 4)
+                round(len(deflected_ids) / resolved_count, 4)
                 if resolved_count
                 else None
             ),

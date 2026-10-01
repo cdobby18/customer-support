@@ -22,7 +22,14 @@ def test_mock_provider_returns_deterministic_text(monkeypatch: pytest.MonkeyPatc
             {"role": "user", "content": "hello there"},
         ]
     )
-    assert result.text == "hello there"
+    assert result.text
+    assert "hello there" not in result.text, "mock echoed the customer's message"
+    assert result.text == llm.chat(
+        messages=[
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "a completely different question"},
+        ]
+    ).text
     assert result.provider == "mock"
     assert result.model == "mock-llm"
     assert result.finish_reason == "stop"
@@ -36,9 +43,8 @@ def test_mock_provider_returns_structurable_json(monkeypatch: pytest.MonkeyPatch
         response_format="json_object",
     )
     parsed = json.loads(result.text)
-    assert parsed["content"] == "summarize this"
-    assert parsed["provider"] == "mock"
-    assert parsed["confidence"] == 0.9
+    assert parsed["content"]
+    assert "summarize this" not in parsed["content"]
 
 
 def test_get_provider_requires_selection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,8 +209,74 @@ def test_usage_is_tracked_and_reset(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_generate_json_returns_parsed_object(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     parsed = llm.generate_json(prompt="Refund please", system="You are triage.")
-    assert parsed["content"] == "Refund please"
-    assert parsed["provider"] == "mock"
+    assert parsed["content"]
+    assert "Refund please" not in parsed["content"], "mock echoed the prompt"
+
+
+def test_mock_draft_prompt_yields_a_grounded_draft() -> None:
+    """The draft shape is inferred from the rendered template, not the user turn."""
+    rendered = prompts.get_template("response.draft_json").render(
+        excerpts="Source 1 (account-access.md): reset your password\nSource 2 (billing.md): refunds",
+    )
+    payload = json.loads(
+        llm.MockLLMProvider().complete(
+            [{"role": "system", "content": rendered}, {"role": "user", "content": "I cannot log in"}],
+            response_format="json_object",
+        ).text
+    )
+
+    assert payload["draft"]
+    assert "I cannot log in" not in payload["draft"], "draft echoed the customer message"
+    assert payload["citations"] == ["Source 1", "Source 2"]
+    assert "(Source 1)" in payload["draft"]
+    assert payload["escalate"] is False
+
+
+def test_mock_draft_without_excerpts_asks_for_a_specialist() -> None:
+    payload = json.loads(
+        llm.MockLLMProvider().complete(
+            [{"role": "system", "content": "Knowledge base excerpts:\n\nReturn JSON with citations and escalate."}],
+            response_format="json_object",
+        ).text
+    )
+    assert payload["citations"] == []
+    assert "specialist" in payload["draft"]
+
+
+def test_mock_agent_assist_prompt_yields_suggested_replies() -> None:
+    rendered = prompts.get_template("agent_assist.suggest_json").render(
+        history="Customer cannot log in."
+    )
+    payload = json.loads(
+        llm.MockLLMProvider().complete(
+            [{"role": "system", "content": rendered}],
+            response_format="json_object",
+        ).text
+    )
+    assert payload["summary"]
+    assert payload["suggested_replies"]
+    assert "recommended_team" in payload
+
+
+def test_mock_leaves_escalation_summary_to_the_deterministic_fallback() -> None:
+    """An empty completion keeps `escalation.py`'s ticket-derived summary."""
+    rendered = prompts.get_template("escalation.summary").render(details="{}")
+    result = llm.MockLLMProvider().complete(
+        [{"role": "system", "content": rendered}, {"role": "user", "content": "I was charged twice"}]
+    )
+    assert result.text == ""
+
+
+def test_mock_leaves_triage_to_the_keyword_classifier() -> None:
+    """Triage wants `intent`; answering it here would replace a working classifier."""
+    rendered = prompts.get_template("triage.classify").render(message="I was charged twice")
+    payload = json.loads(
+        llm.MockLLMProvider().complete(
+            [{"role": "system", "content": rendered}],
+            response_format="json_object",
+        ).text
+    )
+    assert "intent" not in payload
 
 
 def test_generate_json_raises_on_invalid_object() -> None:

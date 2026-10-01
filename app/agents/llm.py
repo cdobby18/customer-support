@@ -16,6 +16,7 @@ injected ``http_request`` transport for unit tests.
 import json
 import os
 import random
+import re
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -231,6 +232,96 @@ def _tokenish_word_count(text: str) -> int:
     return len(text.split())
 
 
+_SOURCE_IN_EXCERPT = re.compile(r"Source (\d+) \(([^)]+)\):")
+
+_MOCK_ASSIST_SUMMARY = (
+    "The customer has reported an issue and is asking for help. A support "
+    "specialist should review the ticket history below and confirm the next "
+    "step with the customer."
+)
+
+_MOCK_GENERIC_REPLY = (
+    "Thanks for reaching out. A support specialist is reviewing this and will "
+    "follow up shortly."
+)
+
+
+def _mock_sources(system: str) -> list[tuple[str, str]]:
+    """The `(label, source)` pairs rendered into a draft prompt's excerpts."""
+    return [
+        (match.group(1), match.group(2))
+        for match in _SOURCE_IN_EXCERPT.finditer(system)
+    ]
+
+
+def _mock_draft_reply(system: str) -> str:
+    """A canned reply that cites the excerpts it was given.
+
+    Deliberately built from the prompt's own `Source N (file)` labels rather
+    than from the customer message. The previous mock echoed the user's own
+    text, and `run_auto_response` posts the draft to the customer as a public
+    comment, so on the documented demo config the "AI answer" was the customer's
+    message verbatim.
+    """
+    sources = _mock_sources(system)
+    if not sources:
+        return (
+            "Thanks for getting in touch. I do not have a documented answer for "
+            "this yet, so I have asked a specialist to review it and follow up "
+            "with you shortly."
+        )
+    cited = " ".join(f"(Source {label})" for label, _ in sources[:2])
+    titles = ", ".join(source for _, source in sources[:2])
+    return (
+        "Thanks for getting in touch, and sorry for the trouble. I checked our "
+        f"documentation on {titles} {cited} and the steps there should resolve "
+        "this. Please try them in order and reply with the result. If it still "
+        "does not work, I will bring in a specialist who can take a closer look."
+    )
+
+
+def _mock_json_payload(system: str) -> dict[str, Any]:
+    """A deterministic payload shaped like the contract the prompt asks for.
+
+    Shape is inferred from the system prompt because the gateway passes the
+    rendered template through as the system turn and the agents do not declare
+    which template they used.
+    """
+    if "suggested_replies" in system:
+        return {
+            "summary": _MOCK_ASSIST_SUMMARY,
+            "suggested_replies": [_MOCK_GENERIC_REPLY],
+            "recommended_team": "",
+        }
+    if "citations" in system and "escalate" in system:
+        sources = _mock_sources(system)
+        return {
+            "draft": _mock_draft_reply(system),
+            "confidence": 0.9,
+            "citations": [f"Source {label}" for label, _ in sources[:2]],
+            "escalate": False,
+            "reason": "The documented steps in the cited sources answer the question.",
+        }
+    # `triage.classify` is deliberately left unanswered. Triage falls back to
+    # the deterministic keyword classifier, which produces a more realistic
+    # intent than anything a canned payload could invent, so answering here
+    # would replace a working classifier with a worse fake.
+    return {"content": _MOCK_GENERIC_REPLY}
+
+
+def _mock_text(system: str) -> str:
+    """Plain-text completion.
+
+    Returns empty for the escalation-summary prompt so `escalation.py` keeps its
+    deterministic summary built from ticket fields. A non-empty mock string
+    would suppress that fallback and leave the customer's own words sitting in
+    `ticket.escalation_summary` as if it were a reviewer's briefing.
+    """
+    if "human reviewer" in system:
+        return ""
+    return _MOCK_GENERIC_REPLY
+
+
 class MockLLMProvider(LLMProvider):
     name = "mock"
 
@@ -245,19 +336,11 @@ class MockLLMProvider(LLMProvider):
         max_tokens: int = 600,
         response_format: str | None = None,
     ) -> LLMResult:
-        content = _last_content(messages)
+        system = _system_content(messages)
         if response_format == "json_object":
-            text = json.dumps(
-                {
-                    "content": content,
-                    "provider": "mock",
-                    "model": "mock-llm",
-                    "confidence": 0.9,
-                },
-                ensure_ascii=False,
-            )
+            text = json.dumps(_mock_json_payload(system), ensure_ascii=False)
         else:
-            text = content if content else "Mock reply"
+            text = _mock_text(system)
         usage = LLMUsage(
             prompt_tokens=sum(_tokenish_word_count(m.get("content", "")) for m in messages) + 4,
             completion_tokens=_tokenish_word_count(text),
@@ -275,12 +358,10 @@ class MockLLMProvider(LLMProvider):
         )
 
 
-def _last_content(messages: list[dict[str, str]]) -> str:
-    for message in reversed(messages):
-        role = message.get("role")
-        content = str(message.get("content", ""))
-        if role in {"user", "assistant"} and content:
-            return content
+def _system_content(messages: list[dict[str, str]]) -> str:
+    for message in messages:
+        if message.get("role") == "system":
+            return str(message.get("content", ""))
     return ""
 
 
