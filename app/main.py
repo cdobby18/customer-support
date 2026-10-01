@@ -6,6 +6,7 @@ request/response models in ``app.api.schemas``, and shared business helpers in
 ``app.agents.support`` / ``app.agents.auto_response``.
 """
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -15,7 +16,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.routers import admin, agent_assist, auth, system, tickets, webhooks
 from app.core.config_validation import validate_security_configuration
-from app.core.database import init_db
+from app.core.database import (
+    alembic_head_revision,
+    current_schema_revision,
+    init_db,
+)
 from app.core.observability import (
     RequestContextMiddleware,
     get_app_logger,
@@ -26,10 +31,51 @@ from app.core.observability import (
 setup_logging()
 
 
+def warn_if_schema_not_migrated(logger: logging.Logger) -> None:
+    """Log when the database is not at the migration chain's head.
+
+    Deliberately a warning and not an exception. Refusing to start would be
+    stricter, but a replica that cannot read `alembic_version` at all (the
+    database still starting, a read-only role) would then take a healthy
+    deployment down. Refusing to start belongs in the readiness probe, which
+    can fail without killing the process.
+
+    This is the failure `create_all()` used to hide: it creates tables that
+    Alembic never declared, so a missing revision could pass unnoticed until an
+    endpoint queried the absent table. Production skips `create_all()` now, so
+    the only thing standing between a deploy and that class of 500 is a
+    migration having been run.
+    """
+    head = alembic_head_revision()
+    if head is None:
+        logger.warning(
+            "could not read the migration chain head; cannot verify the schema"
+        )
+        return
+    current = current_schema_revision()
+    if current == head:
+        return
+    if current is None:
+        logger.warning(
+            "database has no alembic_version row; run `alembic upgrade head` "
+            "(expected %s). The API will serve requests against an unmanaged "
+            "schema.",
+            head,
+        )
+        return
+    logger.warning(
+        "database schema is at revision %s but the migration chain head is %s; "
+        "run `alembic upgrade head` before serving traffic.",
+        current,
+        head,
+    )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     validate_security_configuration()
     init_db()
+    warn_if_schema_not_migrated(get_app_logger())
     setup_tracing(app)
     yield
 

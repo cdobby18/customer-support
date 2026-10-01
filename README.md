@@ -202,10 +202,13 @@ dependencies. The API is the default command and the worker overrides it.
 docker build -t support-api .
 ```
 
-**Migrations are a separate step, not part of startup.** `init_db()` uses
-`create_all()`, which creates missing tables but never alters an existing one, so
-an existing database needs Alembic. Running it inside the entrypoint would also
-race when more than one replica starts at once.
+**Migrations are a separate step, not part of startup.** In production
+`init_db()` is a no-op: `create_all()` creates missing tables but never alters an
+existing one, so an existing database needs Alembic. Running it inside the
+entrypoint would also race when more than one replica starts at once.
+
+Each replica logs a warning at boot if its recorded revision is behind the chain
+head, but still serves — refusing to start belongs to the readiness probe.
 
 ```powershell
 docker run --rm -e DATABASE_URL=postgresql+psycopg://user:pass@host:5432/db support-api alembic upgrade head
