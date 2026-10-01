@@ -1,13 +1,18 @@
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
+from collections.abc import Callable
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from celery import Celery
+from celery import Task
+
+logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -121,7 +126,105 @@ def _post_json(url: str, data: dict, timeout: int = 10, headers: dict | None = N
     return _post_bytes(url, json.dumps(data).encode("utf-8"), timeout=timeout, headers=headers)
 
 
-@celery_app.task(bind=True, name="support.notify")
+def notification_idempotency_key(event: str, ticket_id: str, payload: dict) -> str:
+    """A stable key for one logical notification, identical across retries.
+
+    A retried POST cannot know whether the first attempt actually reached the
+    receiver, so without a key a transient failure delivers the same event up to
+    four times. The key is derived from the event, ticket and payload with
+    sorted keys, so every attempt (and a manual replay) produces the same value
+    and the receiver can drop the duplicates.
+    """
+    material = json.dumps(
+        {"event": event, "ticket_id": ticket_id, "payload": payload},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+_dead_letter_sink: Callable[[dict], None] | None = None
+
+
+def set_dead_letter_sink(sink: Callable[[dict], None] | None) -> None:
+    """Redirect where failed notifications are recorded (tests use this).
+
+    The default sink writes an audit row through `SessionLocal`, which in a
+    test process points at the developer's `support.db` rather than the
+    overridden test session, so tests inject an in-memory recorder instead.
+    """
+    global _dead_letter_sink
+    _dead_letter_sink = sink
+
+
+def record_notification_failure(
+    *,
+    event: str | None,
+    ticket_id: str | None,
+    payload: dict | None,
+    error: str,
+    task_id: str | None,
+    attempts: int,
+) -> None:
+    """Persist an exhausted notification so it is visible and replayable.
+
+    Best-effort by design: a dead letter is only useful if it never takes the
+    worker down with it, so every failure here is swallowed and logged.
+    """
+    record = {
+        "event": event,
+        "ticket_id": ticket_id,
+        "payload": payload,
+        "error": error,
+        "task_id": task_id,
+        "attempts": attempts,
+    }
+    sink = _dead_letter_sink or _write_dead_letter_audit
+    try:
+        sink(record)
+    except Exception:
+        logger.exception("Failed to record a dead-lettered notification: %s", record)
+
+
+def _write_dead_letter_audit(record: dict) -> None:
+    from app.api.schemas import add_audit_log
+    from app.core.database import SessionLocal
+    from app.core.models import AuditLogRecord
+
+    with SessionLocal() as db:
+        add_audit_log(
+            db,
+            None,
+            "notification.delivery_failed",
+            "ticket",
+            record.get("ticket_id") or "unknown",
+            record,
+        )
+        db.commit()
+
+
+class NotificationTask(Task):
+    """Base task that records an audit row when a notification is given up on.
+
+    Celery's default is to log a traceback and forget: a notification whose
+    receiver was down for the whole retry budget disappears. This turns that
+    terminal failure into a queryable audit row.
+    """
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):  # type: ignore[override]
+        attempt = getattr(getattr(self, "request", None), "retries", 0)
+        record_notification_failure(
+            event=args[0] if len(args) > 0 else None,
+            ticket_id=args[1] if len(args) > 1 else None,
+            payload=args[2] if len(args) > 2 else None,
+            error=repr(exc),
+            task_id=task_id,
+            attempts=attempt + 1,
+        )
+
+
+@celery_app.task(bind=True, base=NotificationTask, name="support.notify")
 def dispatch_notification(
     self: Celery,
     event: str,
@@ -151,7 +254,13 @@ def dispatch_notification(
             "reason": "notify_webhook_secret_missing",
         }
 
-    body = {"event": event, "ticket_id": ticket_id, **payload}
+    idempotency_key = notification_idempotency_key(event, ticket_id, payload)
+    body = {
+        "event": event,
+        "ticket_id": ticket_id,
+        "idempotency_key": idempotency_key,
+        **payload,
+    }
     timestamp = str(int(time.time()))
     encoded = json.dumps(body).encode("utf-8")
     signature = sign_notification_body(encoded, secret, timestamp)
@@ -164,6 +273,7 @@ def dispatch_notification(
                 "X-Support-Event": event,
                 "X-Support-Timestamp": timestamp,
                 "X-Support-Signature": f"t={timestamp},v1={signature}",
+                "X-Support-Idempotency-Key": idempotency_key,
             },
         )
         return {

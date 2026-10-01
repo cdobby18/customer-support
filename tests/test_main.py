@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 from app.agents.knowledge import MIN_MATCH_SCORE, KnowledgeMatch, search_knowledge
 from app.agents.triage import TriageIntent, TriagePriority, TriageSentiment, classify_ticket
 from app.api.routers import webhooks as webhooks
-from app.api.routers.webhooks import _rate_limiter_memory
 from app.core.config_validation import validate_security_configuration
 from app.core.models import AuditLogRecord, UserRecord, UserRole
+from app.security import rate_limit
 from app.security.auth import create_access_token
 from harness import ADMIN_ID, client, drop_schema, reset_schema, seed_admin, test_engine
 
@@ -939,9 +939,8 @@ def test_webhook_rate_limit_rejects_excess_requests(monkeypatch: pytest.MonkeyPa
     # a window another test consumed and the first post would be 429. This test
     # is about the ceiling logic, not Redis persistence, so force the memory
     # path and clear it regardless of where the suite runs.
-    monkeypatch.setattr(webhooks, "_rate_limiter_redis", None)
-    monkeypatch.setattr(webhooks, "_get_redis", lambda: None)
-    _rate_limiter_memory.clear()
+    monkeypatch.setattr(rate_limit, "_redis", lambda: None)
+    rate_limit.reset_rate_limits()
     response = client.post(
         "/webhooks/email",
         headers={"X-Webhook-Secret": "local-webhook-secret"},

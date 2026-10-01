@@ -1,8 +1,8 @@
 """Provider-agnostic LLM gateway.
 
 Centralizes OpenAI / Azure OpenAI calls behind a single interface with
-process-local rate limiting, retry-with-backoff, prompt/response logging,
-and token-based cost tracking. Provider selection is driven by the
+rate limiting (shared across replicas when `RATE_LIMIT_BACKEND=redis`),
+retry-with-backoff, prompt/response logging, and token-based cost tracking. Provider selection is driven by the
 ``LLM_PROVIDER`` environment variable (``mock``, ``openai``, or
 ``azure_openai``) and is opt-in: when unset the gateway raises
 ``LLMNotConfigured`` so downstream agents can degrade gracefully.
@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from app.agents.guardrails import redact
 from app.core.http_json import default_json_request
 from app.core.observability import get_app_logger
+from app.security import rate_limit
 
 
 class LLMError(Exception):
@@ -382,34 +383,30 @@ def get_provider(name: str | None = None) -> LLMProvider:
     return provider
 
 
-_rate_buckets: dict[str, list[float]] = {}
-_rate_lock = threading.Lock()
+LLM_RATE_LIMIT_WINDOW_SECONDS = 60
 
 
 def _enforce_rate_limit(provider_name: str) -> None:
+    """Cap calls per provider per minute.
+
+    Shares `app.security.rate_limit` with the login and webhook throttles, so
+    setting RATE_LIMIT_BACKEND=redis makes the cap cover every replica rather
+    than granting each worker its own budget.
+    """
     limit = int(os.getenv("LLM_RATE_LIMIT_PER_MINUTE", "60"))
     if limit <= 0:
         return
-    now = time.monotonic()
-    window_start = now - 60
-    with _rate_lock:
-        recent = [
-            timestamp
-            for timestamp in _rate_buckets.get(provider_name, [])
-            if timestamp > window_start
-        ]
-        if len(recent) >= limit:
-            raise LLMRateLimitExceeded(
-                f"LLM rate limit exceeded for provider {provider_name!r}: "
-                f"{limit} calls/minute"
-            )
-        recent.append(now)
-        _rate_buckets[provider_name] = recent
+    key = f"llm_ratelimit:{provider_name}"
+    if rate_limit.check(key, limit, LLM_RATE_LIMIT_WINDOW_SECONDS):
+        raise LLMRateLimitExceeded(
+            f"LLM rate limit exceeded for provider {provider_name!r}: "
+            f"{limit} calls/minute"
+        )
+    rate_limit.record(key, limit, LLM_RATE_LIMIT_WINDOW_SECONDS)
 
 
 def reset_rate_limits() -> None:
-    with _rate_lock:
-        _rate_buckets.clear()
+    rate_limit.reset_rate_limits()
 
 
 def _backoff_seconds(attempt: int) -> float:

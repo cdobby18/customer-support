@@ -21,6 +21,7 @@ from app.security.auth import (
     create_access_token,
     decode_access_token,
 )
+from app.security import rate_limit
 from app.security.login_throttle import (
     LoginThrottled,
     check_login_allowed,
@@ -118,7 +119,7 @@ def test_lockout_lapses_once_the_window_expires(monkeypatch) -> None:
     for _ in range(3):
         record_login_failure(key)
 
-    monkeypatch.setattr(login_throttle.time, "monotonic", lambda: login_throttle.time.perf_counter() + 5)
+    monkeypatch.setattr(rate_limit.time, "monotonic", lambda: rate_limit.time.perf_counter() + 5)
     check_login_allowed(key)
     assert login_throttle.retry_after_seconds(key) == 0
 

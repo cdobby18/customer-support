@@ -312,3 +312,123 @@ def test_post_json_sends_single_json_body() -> None:
     assert request_method[0] == "POST"
     assert request_headers[0] == "application/json"
     assert b'"a"' in request_body[0]
+
+
+# --- dead letters and idempotency (#23) ------------------------------------
+
+
+def test_idempotency_key_is_stable_and_content_addressed() -> None:
+    key = workers.notification_idempotency_key(
+        "ticket.created", "ticket-1", {"customer_id": "u1"}
+    )
+    again = workers.notification_idempotency_key(
+        "ticket.created", "ticket-1", {"customer_id": "u1"}
+    )
+    other = workers.notification_idempotency_key(
+        "ticket.created", "ticket-1", {"customer_id": "u2"}
+    )
+
+    assert key == again
+    assert key != other
+    assert len(key) == 64
+
+
+def test_idempotency_key_is_independent_of_payload_order() -> None:
+    a = workers.notification_idempotency_key("ticket.created", "t", {"a": 1, "b": 2})
+    b = workers.notification_idempotency_key("ticket.created", "t", {"b": 2, "a": 1})
+
+    assert a == b
+
+
+def test_notification_sends_the_idempotency_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _sent(
+        monkeypatch,
+        NOTIFY_WEBHOOK_URL="https://hooks.example.com/inbound",
+        NOTIFY_WEBHOOK_SECRET="shhh",
+    )
+
+    body = json.loads(sent["body"])
+    header = sent["headers"]["X-Support-Idempotency-Key"]
+
+    assert header == body["idempotency_key"]
+    assert header == workers.notification_idempotency_key(
+        "ticket.created", "ticket-1", {"customer_id": "user-1"}
+    )
+
+
+def test_on_failure_records_a_dead_letter(monkeypatch: pytest.MonkeyPatch) -> None:
+    records: list[dict] = []
+    monkeypatch.setattr(workers, "_dead_letter_sink", records.append)
+
+    workers.dispatch_notification.on_failure(
+        RuntimeError("receiver down"),
+        "task-abc",
+        ["ticket.created", "ticket-1", {"customer_id": "u1"}],
+        {},
+        None,
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["event"] == "ticket.created"
+    assert record["ticket_id"] == "ticket-1"
+    assert "receiver down" in record["error"]
+    assert record["task_id"] == "task-abc"
+    assert record["attempts"] == 1
+
+
+def test_a_failing_dead_letter_sink_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(record: dict) -> None:
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(workers, "_dead_letter_sink", boom)
+
+    # Must never take the worker down with it.
+    workers.record_notification_failure(
+        event="ticket.created",
+        ticket_id="ticket-1",
+        payload={},
+        error="x",
+        task_id="task-abc",
+        attempts=4,
+    )
+
+
+def test_default_dead_letter_sink_writes_an_audit_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api import schemas
+    from app.core import database
+
+    calls: list = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def commit(self):
+            calls.append("commit")
+
+    def fake_add_audit_log(db, actor_id, action, entity_type, entity_id, details):
+        calls.append((actor_id, action, entity_type, entity_id, details))
+
+    monkeypatch.setattr(database, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(schemas, "add_audit_log", fake_add_audit_log)
+
+    workers._write_dead_letter_audit(
+        {
+            "event": "ticket.created",
+            "ticket_id": "ticket-1",
+            "payload": {"customer_id": "u1"},
+            "error": "boom",
+            "task_id": "task-abc",
+            "attempts": 4,
+        }
+    )
+
+    assert calls[0][0] is None
+    assert calls[0][1] == "notification.delivery_failed"
+    assert calls[0][2] == "ticket"
+    assert calls[0][3] == "ticket-1"
+    assert calls[1] == "commit"

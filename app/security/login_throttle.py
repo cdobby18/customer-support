@@ -1,13 +1,14 @@
-"""Login brute-force throttling.
+"""Login and registration brute-force throttling.
 
-Failed logins are counted per (email, client host) in a process-local sliding
-window. Once the count reaches the limit the pair is locked out for
-AUTH_LOGIN_LOCKOUT_SECONDS, and further attempts are refused with 429 without
-touching the password hash. A successful login clears the counter.
+Failed logins are counted per (email, client host) in a sliding window. Once the
+count reaches the limit the pair is locked out for AUTH_LOGIN_LOCKOUT_SECONDS,
+and further attempts are refused with 429 without touching the password hash. A
+successful login clears the counter.
 
-Scope: process-local, like the webhook and LLM rate limiters. It throttles one
-worker; a multi-worker deployment needs a shared store (Redis) to enforce the
-limit cluster-wide, otherwise the effective limit is `limit x workers`.
+The storage is delegated to `app.security.rate_limit`, so the same limiter backs
+login, registration, inbound webhooks and the LLM gateway, and setting
+RATE_LIMIT_BACKEND=redis makes every window shared across workers. Without that
+the counters are process-local and the effective limit is `limit x workers`.
 
 The client host is taken from the socket, not `X-Forwarded-For`, which is
 untrusted input. Behind a reverse proxy every caller therefore shares the
@@ -18,15 +19,12 @@ address instead.
 """
 
 import os
-import threading
-import time
+
+from app.security import rate_limit
 
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_LOCKOUT_SECONDS = 300
 DEFAULT_REGISTER_MAX_ATTEMPTS = 20
-
-_attempt_windows: dict[str, list[float]] = {}
-_window_lock = threading.Lock()
 
 
 class LoginThrottled(Exception):
@@ -80,32 +78,20 @@ def check_registration_allowed(key: str) -> None:
     limit = max_registration_attempts()
     if limit <= 0:
         return
-    now = time.monotonic()
-    with _window_lock:
-        attempts = _pruned_attempts(key, now)
-        retry_after = _refresh_lockout(key, attempts, now)
-    if retry_after and len(attempts) >= limit:
-        raise LoginThrottled(retry_after, len(attempts))
+    window = login_lockout_seconds()
+    retry_after = rate_limit.check(key, limit, window)
+    if retry_after:
+        raise LoginThrottled(retry_after, rate_limit.count(key, window))
 
 
 def record_registration_attempt(key: str) -> int:
     """Add one attempt to `key`'s window. Returns the count afterwards."""
-    limit = max_registration_attempts()
-    if limit <= 0:
-        return 0
-    with _window_lock:
-        attempts = _pruned_attempts(key, time.monotonic())
-        attempts.append(time.monotonic())
-        attempts = attempts[-limit:]
-        _attempt_windows[key] = attempts
-    return len(attempts)
+    return rate_limit.record(key, max_registration_attempts(), login_lockout_seconds())
 
 
 def retry_after_seconds(key: str) -> int:
     """Seconds until the lockout on `key` lapses. 0 when it is not locked out."""
-    now = time.monotonic()
-    with _window_lock:
-        return _refresh_lockout(key, _pruned_attempts(key, now), now)
+    return rate_limit.check(key, max_login_attempts(), login_lockout_seconds())
 
 
 def check_login_allowed(key: str) -> None:
@@ -113,51 +99,22 @@ def check_login_allowed(key: str) -> None:
     limit = max_login_attempts()
     if limit <= 0:
         return
-    now = time.monotonic()
-    with _window_lock:
-        attempts = _pruned_attempts(key, now)
-        retry_after = _refresh_lockout(key, attempts, now)
-    if retry_after and len(attempts) >= limit:
-        raise LoginThrottled(retry_after, len(attempts))
+    window = login_lockout_seconds()
+    retry_after = rate_limit.check(key, limit, window)
+    if retry_after:
+        raise LoginThrottled(retry_after, rate_limit.count(key, window))
 
 
 def record_login_failure(key: str) -> int:
     """Add a failure to `key`'s window. Returns the window size afterwards, so
     the caller can tell when the limit was just reached (one audit row per
     lockout, not one per refused request)."""
-    limit = max_login_attempts()
-    if limit <= 0:
-        return 0
-    with _window_lock:
-        attempts = _pruned_attempts(key, time.monotonic())
-        attempts.append(time.monotonic())
-        attempts = attempts[-limit:]
-        _attempt_windows[key] = attempts
-    return len(attempts)
+    return rate_limit.record(key, max_login_attempts(), login_lockout_seconds())
 
 
 def clear_login_failures(key: str) -> None:
-    with _window_lock:
-        _attempt_windows.pop(key, None)
+    rate_limit.clear(key)
 
 
 def reset_login_throttle() -> None:
-    with _window_lock:
-        _attempt_windows.clear()
-
-
-def _pruned_attempts(key: str, now: float) -> list[float]:
-    window_start = now - login_lockout_seconds()
-    return [timestamp for timestamp in _attempt_windows.get(key, []) if timestamp > window_start]
-
-
-def _refresh_lockout(key: str, attempts: list[float], now: float) -> int:
-    """Rewrite `key`'s window from pruned attempts and report seconds left.
-    Caller holds _window_lock."""
-    if attempts:
-        _attempt_windows[key] = attempts
-    else:
-        _attempt_windows.pop(key, None)
-    if not attempts:
-        return 0
-    return max(1, int(attempts[0] + login_lockout_seconds() - now) + 1)
+    rate_limit.reset_rate_limits()

@@ -2,11 +2,9 @@
 
 import hmac
 import os
-import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import redis
 from fastapi import (
     APIRouter,
     Depends,
@@ -45,50 +43,25 @@ from app.core.models import (
     UserRecord,
 )
 from app.core.workers import enqueue_notification
+from app.security import rate_limit
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-_rate_limiter_redis: redis.Redis | None = None
-_rate_limiter_memory: dict[str, list[float]] = {}
-
-
-def _get_redis() -> redis.Redis | None:
-    global _rate_limiter_redis
-    if _rate_limiter_redis is None:
-        try:
-            _rate_limiter_redis = redis.from_url(REDIS_URL, decode_responses=True)
-            _rate_limiter_redis.ping()
-        except Exception:
-            _rate_limiter_redis = None
-    return _rate_limiter_redis
+WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = 60
 
 
 def enforce_webhook_rate_limit(request: Request) -> None:
-    now = time.monotonic()
-    window_seconds = 60
-    window_start = now - window_seconds
+    """Sliding-window limit on the unauthenticated inbound webhook.
+
+    Shares `app.security.rate_limit` with the login and LLM throttles, so the
+    window lives in Redis when RATE_LIMIT_BACKEND=redis and the limit is
+    cluster-wide rather than per-worker.
+    """
     client_host = request.client.host if request.client else "unknown"
     limit = int(os.getenv("WEBHOOK_RATE_LIMIT_PER_MINUTE", "60"))
+    key = f"webhook_ratelimit:{client_host}"
 
-    redis_client = _get_redis()
-    if redis_client is not None:
-        key = f"webhook_ratelimit:{client_host}"
-        pipe = redis_client.pipeline()
-        pipe.zremrangebyscore(key, 0, window_start)
-        pipe.zcard(key)
-        pipe.zadd(key, {str(now): now})
-        pipe.expire(key, window_seconds + 1)
-        results = pipe.execute()
-        current_count = results[1]
-        if current_count >= limit:
-            raise HTTPException(status_code=429, detail="Webhook rate limit exceeded")
-    else:
-        request_times = [
-            timestamp for timestamp in _rate_limiter_memory.get(client_host, []) if timestamp > window_start
-        ]
-        if len(request_times) >= limit:
-            raise HTTPException(status_code=429, detail="Webhook rate limit exceeded")
-        request_times.append(now)
-        _rate_limiter_memory[client_host] = request_times
+    if rate_limit.check(key, limit, WEBHOOK_RATE_LIMIT_WINDOW_SECONDS):
+        raise HTTPException(status_code=429, detail="Webhook rate limit exceeded")
+    rate_limit.record(key, limit, WEBHOOK_RATE_LIMIT_WINDOW_SECONDS)
 
 
 def webhook_secret_is_valid(provided_secret: str | None) -> bool:
