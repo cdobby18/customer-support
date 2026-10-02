@@ -36,9 +36,9 @@ def init_db() -> None:
     A development and test convenience only. `create_all()` never alters an
     existing table, so it cannot bring a deployed database up to date, and it
     runs DDL on every replica that boots. Production therefore leaves the
-    schema to `alembic upgrade head` as a separate deploy step, which is what
-    docs/DEPLOYMENT.md documents. Skipping it there also means the runtime
-    database role only needs DML, not CREATE/ALTER.
+    schema to `alembic upgrade head` as a separate deploy step. Skipping it
+    there also means the runtime database role only needs DML, not
+    CREATE/ALTER.
     """
     if APP_ENV_IS_PRODUCTION:
         return

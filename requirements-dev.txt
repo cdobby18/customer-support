@@ -17,5 +17,6 @@ coverage>=7.6,<8.0
 # Dependency vulnerability scanning (pip-audit).
 pip-audit>=2.7,<3.0
 
-# Load testing. Used by load_tests/locustfile.py, not by the test suite.
+# Load testing. Used by the maintainer-local Locust harness, not by the
+# test suite, so `pip install -r requirements.txt` is enough to run CI.
 locust>=2.29,<3.0

@@ -1,6 +1,6 @@
 """Triage's policy for an unusable model payload: fall back to the classifier.
 
-Task 8 in `markdowns/FUTURE_TASKS.md`. The keyword classifier is a working
+The keyword classifier is a working
 deterministic answer, so a provider that drifts away from `triage.classify` must
 degrade to it rather than fail the request.
 

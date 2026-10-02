@@ -1,6 +1,6 @@
 """Tests that .env.example stays in line with what the code actually reads.
 
-docs/CONFIGURATION.md calls .env.example canonical, and it is the file a new
+`.env.example` is canonical - it is the file a new
 deployment copies. Nine variables were missing from it - the entire notification
 stack plus every attachment and SLA limit - so those settings were undiscoverable
 without reading the source. Nothing caught that, because no test compared the two.

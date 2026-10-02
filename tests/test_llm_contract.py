@@ -1,6 +1,6 @@
 """The shared JSON-contract layer in `app/agents/llm.py`.
 
-Task 8/#9 in `markdowns/FUTURE_TASKS.md`. Before this, each agent parsed the
+Before this, each agent parsed the
 provider's reply itself and each one failed differently: triage raised, the
 draft agent substituted an empty object, agent assist swallowed it. Nothing
 recorded that a completion had been unusable, so `LLMUsage` counted a broken
