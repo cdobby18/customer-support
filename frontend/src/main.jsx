@@ -480,14 +480,23 @@ function LlmUsageView({ session }) {
         <StatCard icon={<FileText size={17} />} label="Prompt tokens" value={data.total_prompt_tokens.toLocaleString()} tone="teal" />
         <StatCard icon={<Sparkles size={17} />} label="Completion tokens" value={data.total_completion_tokens.toLocaleString()} tone="teal" />
         <StatCard icon={<Gauge size={17} />} label="Est. cost" value={`$${data.total_cost_usd.toFixed(4)}`} tone="amber" />
+        <StatCard icon={<ShieldAlert size={17} />} label="Contract failures" value={data.invalid_responses ?? 0} tone={data.invalid_responses ? "danger" : "teal"} />
       </div>
       {data.since && <p className="analytics-footnote">Counters collected since {data.since}</p>}
+      {data.invalid_responses ? (
+        <div className="team-notice">
+          <ShieldAlert size={15} /> {data.invalid_responses} completion(s) did not match the JSON contract their prompt asked for. Each one is recorded as an <code>llm.invalid_response</code> audit row with a redacted sample.
+        </div>
+      ) : null}
       <article className="analytics-card">
         <header><h4><Activity size={15} /> Usage by model</h4></header>
         <div className="usage-model-list">
           {data.by_model.length ? data.by_model.map((entry) => (
             <div className="usage-model-row" key={entry.model}>
-              <div><strong>{entry.model || "unset"}</strong><span className="usage-model-meta">{entry.calls} calls · {entry.prompt_tokens.toLocaleString()} prompt · {entry.completion_tokens.toLocaleString()} completion</span></div>
+              <div>
+                <strong>{entry.model || "unset"}</strong>
+                <span className="usage-model-meta">{entry.calls} calls · {entry.prompt_tokens.toLocaleString()} prompt · {entry.completion_tokens.toLocaleString()} completion{entry.invalid_responses ? ` · ${entry.invalid_responses} contract failures` : ""}</span>
+              </div>
               <span className="usage-model-cost">${entry.cost_usd.toFixed(4)}</span>
             </div>
           )) : <div className="empty-audit">No LLM calls recorded yet.</div>}
@@ -1018,6 +1027,16 @@ function AgentAssistPanel({ session, ticketId }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // The backend reports *why* there are no suggestions. Collapsing every case
+  // into "no replies suggested" is what made a provider drifting away from
+  // its prompt look like a model that simply had nothing to say.
+  const ASSIST_NOTICES = {
+    not_configured: ["info", "No LLM provider is configured. The summary below is ticket-derived; suggested replies need a provider."],
+    provider_error: ["error", "The LLM provider failed, so there are no suggested replies. The summary below is ticket-derived."],
+    invalid_response: ["error", "The LLM provider answered in a shape this panel could not use, so there are no suggested replies. Check the llm.invalid_response audit rows and /admin/llm/usage - this is prompt drift, not an unhelpful model."],
+    no_suggestions: ["info", "The model answered but suggested no replies. The summary below is still model-written."],
+  };
+
   async function loadAssist() {
     if (!ticketId) return;
     setLoading(true);
@@ -1032,6 +1051,8 @@ function AgentAssistPanel({ session, ticketId }) {
       setLoading(false);
     }
   }
+
+  const notice = assist && assist.status !== "ok" ? ASSIST_NOTICES[assist.status] : null;
 
   return (
     <section className="ai-draft-panel">
@@ -1052,6 +1073,12 @@ function AgentAssistPanel({ session, ticketId }) {
       {!ticketId && <div className="empty-state"><LifeBuoy size={28} /><strong>No ticket selected</strong><span>Pick a ticket from the queue first.</span></div>}
       {assist && (
         <div className="draft-result">
+          {notice ? (
+            <div className={`team-notice ${notice[0] === "error" ? "error-text" : ""}`}>
+              <ShieldAlert size={15} /> {notice[1]}
+              {assist.status_detail && assist.status === "invalid_response" ? <small className="muted"> {assist.status_detail}</small> : null}
+            </div>
+          ) : null}
           <div className="draft-card">
             <div className="draft-card-top">
               <h4><Sparkles size={15} /> Summary</h4>
@@ -1075,7 +1102,7 @@ function AgentAssistPanel({ session, ticketId }) {
                 ) : null}
               </div>
             )) : (
-              <p className="muted">No replies suggested. Set LLM_PROVIDER to enable AI suggestions; the summary above still works without it.</p>
+              <p className="muted">No replies suggested.</p>
             )}
           </div>
 

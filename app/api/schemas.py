@@ -239,6 +239,7 @@ class ModelUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float
+    invalid_responses: int = 0
 
 
 class ResponseDraft(DraftResult):
@@ -277,6 +278,7 @@ class LlmUsageSummary(BaseModel):
     total_completion_tokens: int
     total_cost_usd: float
     since: str | None
+    invalid_responses: int = 0
     by_model: list[ModelUsage]
 
 

@@ -152,6 +152,141 @@ def test_assist_survives_invalid_json(db: Session) -> None:
     assert result.suggested_replies == []
 
 
+# --- task 9: an unusable model shape must not look like an unhelpful one
+
+
+@pytest.fixture
+def recorded_invalid_responses():
+    llm.reset_llm_usage()
+    llm.reset_rate_limits()
+    recorded: list[dict] = []
+    llm.set_invalid_response_sink(recorded.append)
+    yield recorded
+    llm.reset_llm_usage()
+    llm.reset_rate_limits()
+    llm.set_invalid_response_sink(None)
+
+
+def test_a_compliant_payload_reports_ok(db: Session, recorded_invalid_responses) -> None:
+    ticket = add_ticket(db, message="I cannot log in")
+    payload = {"summary": "Locked out.", "suggested_replies": ["Use the reset link."]}
+
+    result = agent_assist.assist_ticket(db, ticket, provider=FakeLLMProvider(payload))
+
+    assert result.status is agent_assist.AssistStatus.ok
+    assert result.status_detail is None
+
+
+def test_a_model_that_offers_no_replies_is_not_a_failure(db: Session) -> None:
+    """A valid answer with no suggestions is a legitimate outcome and must not
+    be dressed up as an error - otherwise the loud path stops meaning anything.
+    """
+    ticket = add_ticket(db, message="I cannot log in")
+
+    result = agent_assist.assist_ticket(
+        db, ticket, provider=FakeLLMProvider({"summary": "Locked out."})
+    )
+
+    assert result.status is agent_assist.AssistStatus.no_suggestions
+    assert result.status_detail is None
+    assert result.suggested_replies == []
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("not json at all", "unparseable_json"),
+        ('{"summary": "trunc', "unparseable_json"),
+        ('["a list"]', "not_an_object"),
+        ("", "empty_response"),
+        # Valid JSON, but no summary: the model ignored the prompt's core
+        # instruction, so its "no replies" means nothing.
+        ('{"suggested_replies": ["Try the reset link."]}', "schema_violation"),
+    ],
+    ids=["prose", "truncated", "json_array", "empty", "no_summary"],
+)
+def test_an_unusable_shape_is_reported_loudly_with_the_reason(
+    db: Session, recorded_invalid_responses, text: str, reason: str
+) -> None:
+    """The bug: `_summarize_with_llm` set `parsed = {}` and carried on, so a
+    provider answering prose looked exactly like a model with nothing to say
+    and the panel said "no replies suggested" for both.
+    """
+    ticket = add_ticket(db, message="Broken", triage_summary="App is broken")
+
+    result = agent_assist.assist_ticket(db, ticket, provider=FakeLLMProvider(text=text))
+
+    assert result.status is agent_assist.AssistStatus.invalid_response
+    assert reason in result.status_detail
+    assert result.suggested_replies == []
+    # The deterministic summary is still returned, so the panel is usable.
+    assert result.summary == "App is broken"
+    assert recorded_invalid_responses[0]["contract"] == "agent_assist.suggest_json"
+    assert recorded_invalid_responses[0]["reason"] == reason
+
+
+def test_an_unusable_shape_still_names_the_provider_and_model(
+    db: Session, recorded_invalid_responses
+) -> None:
+    """The whole point of the loud failure is that staff can go and look at
+    the model that drifted."""
+    ticket = add_ticket(db, message="Broken")
+
+    result = agent_assist.assist_ticket(db, ticket, provider=FakeLLMProvider(text="nope"))
+
+    assert result.provider == "fake"
+    assert result.model == "fake-model"
+
+
+def test_a_missing_provider_is_distinguished_from_a_broken_one(db: Session) -> None:
+    ticket = add_ticket(db, message="Refund please", triage_summary="Customer wants a refund")
+
+    result = agent_assist.assist_ticket(db, ticket)
+
+    assert result.status is agent_assist.AssistStatus.not_configured
+    assert "No LLM provider" in result.status_detail
+    assert result.provider == ""
+    assert result.suggested_replies == []
+
+
+def test_a_transport_failure_is_distinguished_from_a_broken_shape(
+    db: Session, recorded_invalid_responses, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both end in no replies, but one is the provider being down and the other
+    is the provider answering in the wrong shape - different things to go and
+    look at."""
+
+    class BrokenProvider(llm.LLMProvider):
+        name = "broken"
+
+        def validate_config(self) -> None:
+            return None
+
+        def complete(self, messages, **kwargs):
+            raise llm.LLMRetryableError("connection reset")
+
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    ticket = add_ticket(db, message="Refund please")
+
+    result = agent_assist.assist_ticket(db, ticket, provider=BrokenProvider())
+
+    assert result.status is agent_assist.AssistStatus.provider_error
+    assert "connection reset" in result.status_detail
+    assert result.suggested_replies == []
+    assert recorded_invalid_responses == []
+
+
+def test_the_status_survives_the_api_contract(db: Session) -> None:
+    """The panel's copy keys off `status`, so it has to be in the response."""
+    ticket = add_ticket(db, message="I cannot log in")
+
+    result = agent_assist.assist_ticket(db, ticket, provider=FakeLLMProvider(text="nope"))
+    dumped = result.model_dump()
+
+    assert dumped["status"] == "invalid_response"
+    assert dumped["status_detail"]
+
+
 def test_suggested_replies_are_guardrail_validated(db: Session) -> None:
     ticket = add_ticket(db, message="Where do I find my receipt?")
     payload = {

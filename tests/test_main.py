@@ -1712,6 +1712,7 @@ def test_admin_llm_usage_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert summary.status_code == 200
     assert summary.json()["total_calls"] == 1
     assert summary.json()["by_model"][0]["model"] == "mock-llm"
+    assert summary.json()["invalid_responses"] == 0
 
     reset = client.post("/admin/llm/usage/reset", headers=admin_headers())
     assert reset.status_code == 200
@@ -1730,6 +1731,74 @@ def test_admin_llm_usage_requires_admin() -> None:
     _, headers = make_customer("llm-forbidden@example.com")
     response = client.get("/admin/llm/usage", headers=headers)
     assert response.status_code == 403
+
+
+def test_admin_llm_usage_counts_an_unusable_completion_as_a_cost_not_a_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unusable completion is the worst case for cost tracking: the money is
+    spent and the answer is discarded. Reporting it as a plain success is what
+    let this go unnoticed, so it has to be separately countable."""
+    from pydantic import BaseModel
+
+    from app.agents import llm as llm_module
+
+    class Terse(BaseModel):
+        label: str
+
+    llm_module.reset_llm_usage()
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+
+    with pytest.raises(llm_module.LLMContractError):
+        llm_module.generate_structured(
+            None,
+            "prompt text",
+            contract=Terse,
+            contract_name="sample",
+        )
+
+    summary = client.get("/admin/llm/usage", headers=admin_headers()).json()
+
+    # The call happened and was paid for...
+    assert summary["total_calls"] == 1
+    # ...but it did not produce a usable answer.
+    assert summary["invalid_responses"] == 1
+    assert summary["by_model"][0]["invalid_responses"] == 1
+
+
+def test_admin_llm_usage_logs_an_audit_row_for_an_unusable_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic import BaseModel
+    from sqlalchemy.orm import Session
+
+    from app.agents import llm as llm_module
+    from app.core import database
+
+    class Terse(BaseModel):
+        label: str
+
+    # The gateway's audit sink opens its own session rather than going through
+    # FastAPI's `get_db`, so it needs pointing at the test engine explicitly.
+    monkeypatch.setattr(database, "SessionLocal", lambda: Session(test_engine))
+
+    llm_module.reset_llm_usage()
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+
+    with pytest.raises(llm_module.LLMContractError):
+        llm_module.generate_structured(
+            None, "prompt text", contract=Terse, contract_name="sample.contract"
+        )
+
+    logs = client.get(
+        "/admin/audit-logs",
+        headers=admin_headers(),
+        params={"action": "llm.invalid_response"},
+    ).json()
+
+    assert len(logs) == 1
+    assert logs[0]["details"]["contract"] == "sample.contract"
+    assert logs[0]["details"]["reason"]
 
 
 def _create_ticket(message: str) -> dict:
@@ -2359,6 +2428,9 @@ def test_agent_assist_works_without_llm_gateway(monkeypatch: pytest.MonkeyPatch)
     assert body["summary"]
     assert body["provider"] == ""
     assert body["suggested_replies"] == []
+    # Not "the model had nothing to suggest" - nobody configured a model.
+    assert body["status"] == "not_configured"
+    assert "LLM" in body["status_detail"]
 
 
 def test_ticket_attachments_upload_list_and_download() -> None:

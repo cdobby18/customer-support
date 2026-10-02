@@ -2,7 +2,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.agents.llm import generate_json, LLMNotConfigured, LLMError
+from app.agents.llm import generate_structured, LLMNotConfigured, LLMError
 from app.agents.prompts import get_template
 
 
@@ -37,6 +37,27 @@ class TriageResult(BaseModel):
     summary: str
 
 
+class TriageClassification(BaseModel):
+    """The `triage.classify` prompt's JSON contract.
+
+    The enums are the documented key sets, so a model that answers
+    `"intent": "refund"` or `"confidence": 7` is refused by the gateway rather
+    than raising `ValueError` out of the enum constructor. `priority` and
+    `sentiment` are required exactly as the prompt demands them; before this
+    existed a payload missing either raised `KeyError` from the middle of
+    `_classify_with_llm`, which is not an `LLMError` and therefore escaped
+    `classify_ticket`'s handler as an unhandled 500.
+    """
+
+    intent: TriageIntent
+    priority: TriagePriority
+    sentiment: TriageSentiment
+    confidence: float = Field(default=0.7, ge=0, le=1)
+    recommended_team: str = "customer_support"
+    requires_human_review: bool = False
+    summary: str = ""
+
+
 def classify_ticket(message: str) -> TriageResult:
     try:
         return _classify_with_llm(message)
@@ -47,19 +68,21 @@ def classify_ticket(message: str) -> TriageResult:
 def _classify_with_llm(message: str) -> TriageResult:
     template = get_template("triage.classify")
     rendered = template.render(message=message)
-    data = generate_json(prompt=rendered, max_tokens=400)
-
-    if "intent" not in data:
-        raise LLMError("LLM response missing required 'intent' field")
+    data = generate_structured(
+        prompt=rendered,
+        max_tokens=400,
+        contract=TriageClassification,
+        contract_name="triage.classify",
+    ).data
 
     return TriageResult(
-        intent=TriageIntent(data["intent"]),
-        priority=TriagePriority(data["priority"]),
-        sentiment=TriageSentiment(data["sentiment"]),
-        confidence=float(data.get("confidence", 0.7)),
-        recommended_team=data.get("recommended_team", "customer_support"),
-        requires_human_review=bool(data.get("requires_human_review", False)),
-        summary=data.get("summary", " ".join(message.strip().split())[:240]),
+        intent=data.intent,
+        priority=data.priority,
+        sentiment=data.sentiment,
+        confidence=data.confidence,
+        recommended_team=data.recommended_team,
+        requires_human_review=data.requires_human_review,
+        summary=data.summary or " ".join(message.strip().split())[:240],
     )
 
 

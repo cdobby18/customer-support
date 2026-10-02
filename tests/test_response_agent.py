@@ -158,6 +158,162 @@ def test_invalid_json_from_provider_yields_empty_draft() -> None:
     assert result.provider == "fake"
 
 
+# --- the draft agent's policy for a contract failure --------------------
+
+
+def _contract_failure(payload_text: str, recorded: list[dict]):
+    result = response_agent.draft_reply(
+        "I am locked out",
+        provider=FakeLLMProvider(text=payload_text),
+    )
+    return result
+
+
+@pytest.fixture
+def recorded_invalid_responses():
+    llm.reset_llm_usage()
+    llm.reset_rate_limits()
+    recorded: list[dict] = []
+    llm.set_invalid_response_sink(recorded.append)
+    yield recorded
+    llm.reset_llm_usage()
+    llm.reset_rate_limits()
+    llm.set_invalid_response_sink(None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["this is not json", '{"draft": "half', '["a list"]', ""],
+    ids=["prose", "truncated", "json_array", "empty"],
+)
+def test_a_broken_payload_forces_review_and_names_the_cause(
+    text: str, recorded_invalid_responses: list[dict]
+) -> None:
+    """This path answers a customer, so the worst outcome is a ticket in front
+    of a human - never a 500 on ticket creation. It must also say *why*: the
+    old code produced `empty_draft` for both "the model returned nothing" and
+    "the model returned prose", which reads identically in the review trail."""
+    result = _contract_failure(text, recorded_invalid_responses)
+
+    assert result.needs_review is True
+    assert result.reasons == ["invalid_llm_response", "empty_draft"]
+    assert result.draft == ""
+    assert result.confidence == 0.91, "retrieval score, as for any absent confidence"
+    assert recorded_invalid_responses[0]["contract"] == "response.draft_json"
+
+
+def test_a_contract_failure_still_names_the_provider_and_model(
+    recorded_invalid_responses: list[dict]
+) -> None:
+    """A review record with no provider on it cannot be acted on - staff need
+    to know which model to go and look at."""
+    result = _contract_failure("not json", recorded_invalid_responses)
+
+    assert result.provider == "fake"
+    assert result.model == "fake-model"
+
+
+def test_the_draft_contract_is_total_so_only_parse_failures_are_refused(
+    recorded_invalid_responses: list[dict]
+) -> None:
+    """Every field coerces, so this contract can only refuse a payload that is
+    not a JSON object at all.
+
+    A stricter contract would report ordinary model vagueness as a provider
+    failure and bury the real parse failures - the review trail is only useful
+    if `invalid_llm_response` means something.
+    """
+    for payload in (
+        {"draft": "ok", "confidence": "high", "citations": "Source 1", "escalate": "maybe"},
+        {"draft": 42, "confidence": [1], "citations": {"a": 1}, "escalate": None},
+        {},
+    ):
+        result = response_agent.draft_reply("I am locked out", provider=FakeLLMProvider(payload))
+        assert "invalid_llm_response" not in result.reasons
+
+    assert recorded_invalid_responses == []
+
+
+def test_a_non_string_draft_is_coerced_rather_than_refused(
+    recorded_invalid_responses: list[dict]
+) -> None:
+    """A numeric `draft` is not worth escalating on its own - it becomes an
+    empty draft, which already forces review, so recording it as a provider
+    contract failure would only add noise."""
+    result = response_agent.draft_reply(
+        "I am locked out",
+        provider=FakeLLMProvider({"draft": 42, "confidence": 0.9}),
+    )
+
+    assert result.draft == ""
+    assert result.reasons == ["empty_draft"]
+    assert recorded_invalid_responses == []
+
+
+def test_the_content_alias_still_works() -> None:
+    """`content` was the shape an older prompt asked for; the contract keeps
+    accepting it rather than turning a working provider into a failure."""
+    result = response_agent.draft_reply(
+        "I am locked out",
+        provider=FakeLLMProvider({"content": "Please use the reset flow.", "confidence": 0.9}),
+    )
+
+    assert result.draft == "Please use the reset flow."
+    assert result.needs_review is False
+
+
+def test_a_string_confidence_does_not_fail_the_contract(
+    recorded_invalid_responses: list[dict]
+) -> None:
+    """An out-of-range or non-numeric confidence falls back to the retrieval
+    score by design, so it must not be logged as a broken provider."""
+    result = response_agent.draft_reply(
+        "I am locked out",
+        provider=FakeLLMProvider({"draft": "ok", "confidence": "quite sure"}),
+    )
+
+    assert result.confidence == 0.91
+    assert recorded_invalid_responses == []
+
+
+def test_a_numeric_string_confidence_is_still_honoured(
+    recorded_invalid_responses: list[dict]
+) -> None:
+    result = response_agent.draft_reply(
+        "I am locked out",
+        provider=FakeLLMProvider({"draft": "ok", "confidence": "0.9"}),
+    )
+
+    assert result.confidence == 0.9
+    assert recorded_invalid_responses == []
+
+
+def test_a_non_list_citations_value_is_ignored_not_refused(
+    recorded_invalid_responses: list[dict]
+) -> None:
+    """One unusable citation label must not lose the whole draft."""
+    result = response_agent.draft_reply(
+        "I am locked out",
+        provider=FakeLLMProvider({"draft": "ok", "confidence": 0.9, "citations": "Source 1"}),
+    )
+
+    assert result.citations == []
+    assert result.draft == "ok"
+    assert recorded_invalid_responses == []
+
+
+def test_escalate_accepts_the_string_form() -> None:
+    """Real providers answer `"true"`; treating that as false would let a draft
+    the model itself flagged for escalation go out unchecked."""
+    result = response_agent.draft_reply(
+        "I am locked out",
+        provider=FakeLLMProvider({"draft": "ok", "confidence": 0.9, "escalate": "true"}),
+    )
+
+    assert result.needs_review is True
+    assert "agent_recommended_escalation" in result.reasons
+
+
 def test_confidence_falls_back_to_retrieval_score() -> None:
     payload = {
         "draft": "Please reset your password via the reset flow.",

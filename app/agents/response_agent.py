@@ -12,15 +12,19 @@ model confident or retrieval score falls below ``RESPONSE_CONFIDENCE_THRESHOLD``
 escalation.
 """
 
-import json
 import os
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.agents.guardrails import Violation, validate_response
 from app.agents.knowledge import KnowledgeMatch, search_knowledge
-from app.agents.llm import LLMProvider, generate
+from app.agents.llm import (
+    LLMContractError,
+    LLMProvider,
+    generate,
+    generate_structured,
+)
 from app.agents.prompts import get_template
 
 NO_KB_FALLBACK = (
@@ -48,6 +52,57 @@ class DraftResult(BaseModel):
     template_version: int
 
 
+class DraftContract(BaseModel):
+    """The `response.draft_json` prompt's JSON contract.
+
+    Deliberately *total*: every field coerces, so this contract can only refuse
+    a payload that is not a JSON object at all. That matches what the draft
+    agent can actually do with an answer - it needs usable text or it needs to
+    escalate, and anything in between is a judgement call already covered by
+    the confidence threshold. A stricter contract here would report ordinary
+    model vagueness as a provider failure and bury the real parse failures.
+    """
+
+    draft: str = ""
+    content: str = ""
+    confidence: float | None = None
+    citations: list[Any] = Field(default_factory=list)
+    escalate: bool = False
+
+    @field_validator("draft", "content", mode="before")
+    @classmethod
+    def _text_or_empty(cls, value: Any) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _numeric_or_none(cls, value: Any) -> float | None:
+        # A model that answers "high" instead of 0.9 is not a contract
+        # violation, it is a value this agent already knows how to replace
+        # with the retrieval score.
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def _citations_list(cls, value: Any) -> list[Any]:
+        # One unusable label must not cost the agent the whole draft.
+        return value if isinstance(value, list) else []
+
+    @field_validator("escalate", mode="before")
+    @classmethod
+    def _truthy_escalate(cls, value: Any) -> bool:
+        return value is True or value == "true"
+
+    @property
+    def text(self) -> str:
+        return self.draft or self.content
+
+
 def _render_excerpts(matches: list[KnowledgeMatch]) -> tuple[str, dict[str, DraftCitation]]:
     lines: list[str] = []
     citation_map: dict[str, DraftCitation] = {}
@@ -63,9 +118,12 @@ def _render_excerpts(matches: list[KnowledgeMatch]) -> tuple[str, dict[str, Draf
     return "\n".join(lines), citation_map
 
 
-def _match_citations(raw: Any, citation_map: dict[str, DraftCitation]) -> list[DraftCitation]:
-    if not isinstance(raw, list):
-        return []
+def _match_citations(raw: list[Any], citation_map: dict[str, DraftCitation]) -> list[DraftCitation]:
+    """Resolve the model's labels against the prompt's excerpt map.
+
+    `raw` is always a list by the time it gets here - `DraftContract` coerces
+    anything else - so a bad shape is a contract concern, not a matching one.
+    """
     citations: list[DraftCitation] = []
     seen: set[str] = set()
     for item in raw:
@@ -93,10 +151,16 @@ def _decision(
     matches: list[KnowledgeMatch],
     confidence: float,
     escalate: bool,
-    violations: list[Violation],
+    violations: list[GuardrailViolation],
     threshold: float,
+    contract_failed: bool = False,
 ) -> tuple[list[str], bool]:
     reasons: list[str] = []
+    # Recorded ahead of the derived reasons so the review trail says *why* the
+    # draft is unusable ("the provider's answer did not match the contract")
+    # rather than only that it came back empty.
+    if contract_failed:
+        reasons.append("invalid_llm_response")
     if not matches:
         reasons.append("no_knowledge_matches")
     if not draft_text:
@@ -141,35 +205,44 @@ def draft_reply(
 
     excerpts, citation_map = _render_excerpts(matches)
     system = template.render(excerpts=excerpts)
-    result = generate(
-        provider,
-        message,
-        system=system,
-        temperature=0.2,
-        max_tokens=700,
-        response_format="json_object",
-    )
 
-    parsed: dict[str, Any] = {}
+    # A contract failure degrades rather than propagates: this is the path that
+    # answers a customer, so the worst outcome must be a ticket in front of a
+    # human, never a 500 on ticket creation. The empty payload forces
+    # `empty_draft`, which already forces review, and the refusal is reported
+    # separately so the review trail distinguishes "the model gave us nothing
+    # usable" from "the model gave us nothing".
+    contract_failed = False
+    provider_name = model_name = ""
     try:
-        candidate = json.loads(result.text)
-        if isinstance(candidate, dict):
-            parsed = candidate
-    except json.JSONDecodeError:
-        parsed = {}
+        completion = generate_structured(
+            provider,
+            message,
+            system=system,
+            temperature=0.2,
+            max_tokens=700,
+            contract=DraftContract,
+            contract_name="response.draft_json",
+        )
+        payload = completion.data
+        provider_name, model_name = completion.provider, completion.model
+    except LLMContractError as exc:
+        payload = DraftContract()
+        provider_name, model_name = exc.provider, exc.model
+        contract_failed = True
 
-    draft_text = str(parsed.get("draft") or parsed.get("content") or "").strip()
-    escalate = parsed.get("escalate") is True
-    citations = _match_citations(parsed.get("citations"), citation_map)
-    confidence = _parse_confidence(parsed.get("confidence"), matches)
+    draft_text = payload.text
+    citations = _match_citations(payload.citations, citation_map)
+    confidence = _parse_confidence(payload.confidence, matches)
     violations = validate_response(draft_text)
     reasons, needs_review = _decision(
         draft_text,
         matches,
         confidence,
-        escalate,
+        payload.escalate,
         violations,
         threshold,
+        contract_failed=contract_failed,
     )
 
     return DraftResult(
@@ -179,7 +252,7 @@ def draft_reply(
         needs_review=needs_review,
         reasons=reasons,
         guardrail_violations=violations,
-        provider=result.provider,
-        model=result.model,
+        provider=provider_name,
+        model=model_name,
         template_version=template.version,
     )

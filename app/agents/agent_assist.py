@@ -11,18 +11,24 @@ Every LLM-backed part degrades to a deterministic result when the gateway is
 unavailable, so the endpoint keeps working in zero-key dev and tests.
 """
 
-import json
 from collections.abc import Iterable
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.guardrails import Violation, validate_response
 from app.agents.knowledge import KnowledgeMatch, search_knowledge, tokenize
-from app.agents.llm import LLMError, LLMNotConfigured, LLMProvider, generate
+from app.agents.llm import (
+    LLMContractError,
+    LLMError,
+    LLMNotConfigured,
+    LLMProvider,
+    generate_structured,
+)
 from app.agents.prompts import get_template
 from app.core.models import TicketRecord
 
@@ -55,6 +61,53 @@ class SuggestedReply(BaseModel):
     violations: list[Violation] = Field(default_factory=list)
 
 
+class AssistContract(BaseModel):
+    """The `agent_assist.suggest_json` prompt's JSON contract.
+
+    Only `summary` is required, because a summary with no replies is a
+    legitimately unhelpful answer while *no* summary at all means the provider
+    ignored the prompt. `suggested_replies` tolerates junk items so the agent
+    sees the usable ones instead of losing the lot to one bad element, and the
+    cap is applied after parsing.
+    """
+
+    summary: str
+    suggested_replies: list[Any] = Field(default_factory=list)
+    recommended_team: str = ""
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _summary_text(cls, value: Any) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    @field_validator("suggested_replies", mode="before")
+    @classmethod
+    def _replies_list(cls, value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    @field_validator("recommended_team", mode="before")
+    @classmethod
+    def _team_text(cls, value: Any) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+
+class AssistStatus(str, Enum):
+    """Why the agent-assist payload looks the way it does.
+
+    `ok` and `no_suggestions` are the only states that mean "the model
+    answered and had nothing to offer". Everything else is a failure the agent
+    needs to see, because the panel used to render all of them as the same
+    empty list - a provider returning prose where JSON was asked for looked
+    identical to a model with nothing useful to say.
+    """
+
+    ok = "ok"
+    no_suggestions = "no_suggestions"
+    not_configured = "not_configured"
+    provider_error = "provider_error"
+    invalid_response = "invalid_response"
+
+
 class SimilarCase(BaseModel):
     ticket_id: str
     summary: str
@@ -71,6 +124,8 @@ class AgentAssistResult(BaseModel):
     similar_cases: list[SimilarCase] = Field(default_factory=list)
     knowledge: list[KnowledgeMatch] = Field(default_factory=list)
     recommended_team: str | None = None
+    status: AssistStatus = AssistStatus.ok
+    status_detail: str | None = None
     provider: str = ""
     model: str = ""
     template_version: int
@@ -171,42 +226,81 @@ def _parse_replies(raw: Any) -> list[str]:
     return replies
 
 
+class _AssistSummary(BaseModel):
+    """Internal carrier so the LLM section keeps one return path."""
+
+    summary: str
+    replies: list[SuggestedReply] = Field(default_factory=list)
+    team: str = ""
+    status: AssistStatus = AssistStatus.ok
+    status_detail: str | None = None
+    provider: str = ""
+    model: str = ""
+
+
 def _summarize_with_llm(
     history: str,
     ticket: Any,
     *,
     provider: LLMProvider | str | None = None,
-) -> tuple[str, list[SuggestedReply], str, str, str]:
-    """Return (summary, replies, team, provider, model), degrading on LLM errors."""
+) -> _AssistSummary:
+    """Return the LLM-backed part of the assist payload.
+
+    Every LLM problem degrades to the deterministic summary, but the three
+    failure modes are reported distinctly instead of collapsing into an empty
+    reply list: an unconfigured provider, a provider that failed, and a
+    provider that answered in a shape this agent cannot use. The last one is
+    the case worth surfacing loudly - it means the prompt and the provider
+    have drifted apart, and an agent reading "no replies suggested" would have
+    no reason to suspect that.
+    """
     fallback = _fallback_summary(ticket)
     template = get_template("agent_assist.suggest_json")
     system = template.render(history=history)
     try:
-        result = generate(
+        completion = generate_structured(
             provider,
             "Summarize this ticket and suggest replies for the agent.",
             system=system,
             temperature=0.2,
             max_tokens=800,
-            response_format="json_object",
+            contract=AssistContract,
+            contract_name="agent_assist.suggest_json",
         )
-    except (LLMNotConfigured, LLMError):
-        return fallback, [], "", "", ""
+    except LLMNotConfigured:
+        return _AssistSummary(
+            summary=fallback,
+            status=AssistStatus.not_configured,
+            status_detail="No LLM provider is configured.",
+        )
+    except LLMContractError as exc:
+        return _AssistSummary(
+            summary=fallback,
+            status=AssistStatus.invalid_response,
+            status_detail=str(exc),
+            provider=exc.provider,
+            model=exc.model,
+        )
+    except LLMError as exc:
+        return _AssistSummary(
+            summary=fallback,
+            status=AssistStatus.provider_error,
+            status_detail=str(exc),
+        )
 
-    try:
-        parsed = json.loads(result.text)
-        if not isinstance(parsed, dict):
-            parsed = {}
-    except json.JSONDecodeError:
-        parsed = {}
-
-    summary = str(parsed.get("summary") or "").strip() or fallback
+    payload = completion.data
     replies = [
         SuggestedReply(text=text, violations=validate_response(text))
-        for text in _parse_replies(parsed.get("suggested_replies"))
+        for text in _parse_replies(payload.suggested_replies)
     ]
-    team = str(parsed.get("recommended_team") or "").strip() or None
-    return summary, replies, team or "", result.provider, result.model
+    return _AssistSummary(
+        summary=payload.summary or fallback,
+        replies=replies,
+        team=payload.recommended_team,
+        status=AssistStatus.ok if replies else AssistStatus.no_suggestions,
+        provider=completion.provider,
+        model=completion.model,
+    )
 
 
 def assist_ticket(
@@ -221,19 +315,19 @@ def assist_ticket(
     """Assemble the full agent-assist payload for one ticket."""
     comments = list(comments)
     history = build_history(ticket, comments)
-    summary, replies, team, provider_name, model = _summarize_with_llm(
-        history, ticket, provider=provider
-    )
+    assist = _summarize_with_llm(history, ticket, provider=provider)
     query = _clip(ticket.message, _HISTORY_MESSAGE_LIMIT)
 
     return AgentAssistResult(
         ticket_id=ticket.id,
-        summary=summary,
-        suggested_replies=replies,
+        summary=assist.summary,
+        suggested_replies=assist.replies,
         similar_cases=find_similar_cases(db, ticket, limit=similar_limit),
         knowledge=search_knowledge(query, limit=kb_limit) if kb_limit > 0 else [],
-        recommended_team=team or None,
-        provider=provider_name,
-        model=model,
+        recommended_team=assist.team or None,
+        status=assist.status,
+        status_detail=assist.status_detail,
+        provider=assist.provider,
+        model=assist.model,
         template_version=get_template("agent_assist.suggest_json").version,
     )

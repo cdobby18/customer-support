@@ -21,9 +21,9 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.agents.guardrails import redact
 from app.core.http_json import default_json_request
@@ -49,6 +49,34 @@ class LLMRateLimitExceeded(LLMError):
 
 class LLMRetryableError(LLMError):
     """Raised for transient failures (429, 5xx, network). Retried."""
+
+
+class LLMContractError(LLMError):
+    """The provider answered, but not in the shape the prompt asked for.
+
+    Distinct from `LLMRetryableError`: the HTTP call succeeded and the tokens
+    were spent, so retrying the same request usually reproduces the same
+    unusable payload. Callers decide what an unusable payload means for them
+    (triage falls back to its keyword classifier, the draft agent forces
+    review, agent assist reports the failure) - this class only guarantees the
+    refusal is a typed, recorded event rather than a silent substitution.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        contract: str = "",
+        provider: str = "",
+        model: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.contract = contract
+        self.provider = provider
+        self.model = model
+
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 class LLMUsage(BaseModel):
@@ -414,7 +442,58 @@ def _backoff_seconds(attempt: int) -> float:
 
 
 _usages: list[dict[str, Any]] = []
+_invalid_responses: list[dict[str, Any]] = []
 _usage_lock = threading.Lock()
+
+_invalid_response_sink: Callable[[dict[str, Any]], None] | None = None
+
+
+def set_invalid_response_sink(sink: Callable[[dict[str, Any]], None] | None) -> None:
+    """Redirect where unusable model output is recorded (tests use this).
+
+    The default sink writes an audit row through `SessionLocal`, which in a
+    test process points at the developer's `support.db` rather than the
+    overridden test session, so tests inject an in-memory recorder instead.
+    """
+    global _invalid_response_sink
+    _invalid_response_sink = sink
+
+
+def record_invalid_response(record: dict[str, Any]) -> None:
+    """Count an unusable model payload and persist it as `llm.invalid_response`.
+
+    A completion that cannot be parsed used to be indistinguishable from a
+    completion nobody read: `LLMUsage` counted it as a success and no audit
+    row existed, so a provider silently drifting away from its prompt was
+    invisible until someone noticed the quality of the answers. Best-effort
+    like the notification dead letter - recording a bad response must never
+    take down the request that was already going to degrade.
+    """
+    with _usage_lock:
+        _invalid_responses.append(record)
+    sink = _invalid_response_sink or _write_invalid_response_audit
+    try:
+        sink(record)
+    except Exception:
+        get_app_logger().exception(
+            "Failed to record an invalid LLM response: %s", record.get("contract")
+        )
+
+
+def _write_invalid_response_audit(record: dict[str, Any]) -> None:
+    from app.api.schemas import add_audit_log
+    from app.core.database import SessionLocal
+
+    with SessionLocal() as db:
+        add_audit_log(
+            db,
+            None,
+            "llm.invalid_response",
+            "llm",
+            str(record.get("contract") or "unknown"),
+            record,
+        )
+        db.commit()
 
 
 def _record_usage(result: LLMResult) -> None:
@@ -431,8 +510,18 @@ def _record_usage(result: LLMResult) -> None:
         _usages.append(entry)
 
 
+def get_invalid_responses() -> list[dict[str, Any]]:
+    with _usage_lock:
+        return list(_invalid_responses)
+
+
 def get_llm_usage_summary() -> dict[str, Any]:
     with _usage_lock:
+        invalid_by_model: dict[str, int] = {}
+        for entry in _invalid_responses:
+            model = str(entry.get("model") or "unknown")
+            invalid_by_model[model] = invalid_by_model.get(model, 0) + 1
+        invalid_total = len(_invalid_responses)
         if not _usages:
             return {
                 "total_calls": 0,
@@ -440,6 +529,7 @@ def get_llm_usage_summary() -> dict[str, Any]:
                 "total_completion_tokens": 0,
                 "total_cost_usd": 0.0,
                 "since": None,
+                "invalid_responses": invalid_total,
                 "by_model": [],
             }
         per_model: dict[str, list[float]] = {}
@@ -449,6 +539,7 @@ def get_llm_usage_summary() -> dict[str, Any]:
             bucket[1] += entry["prompt_tokens"]
             bucket[2] += entry["completion_tokens"]
             bucket[3] += entry["cost_usd"]
+        models = sorted(set(per_model) | set(invalid_by_model))
         return {
             "total_calls": len(_usages),
             "total_prompt_tokens": sum(entry["prompt_tokens"] for entry in _usages),
@@ -457,15 +548,17 @@ def get_llm_usage_summary() -> dict[str, Any]:
                 sum(entry["cost_usd"] for entry in _usages), 6
             ),
             "since": _usages[0]["ts"],
+            "invalid_responses": invalid_total,
             "by_model": [
                 {
                     "model": model,
-                    "calls": int(bucket[0]),
-                    "prompt_tokens": int(bucket[1]),
-                    "completion_tokens": int(bucket[2]),
-                    "cost_usd": round(bucket[3], 6),
+                    "calls": int(per_model[model][0]) if model in per_model else 0,
+                    "prompt_tokens": int(per_model[model][1]) if model in per_model else 0,
+                    "completion_tokens": int(per_model[model][2]) if model in per_model else 0,
+                    "cost_usd": round(per_model[model][3], 6) if model in per_model else 0.0,
+                    "invalid_responses": invalid_by_model.get(model, 0),
                 }
-                for model, bucket in sorted(per_model.items())
+                for model in models
             ],
         }
 
@@ -473,6 +566,7 @@ def get_llm_usage_summary() -> dict[str, Any]:
 def reset_llm_usage() -> None:
     with _usage_lock:
         _usages.clear()
+        _invalid_responses.clear()
 
 
 def _log_call(
@@ -563,6 +657,142 @@ def generate(
     )
 
 
+_JSON_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
+_INVALID_SAMPLE_CHARS = 500
+
+
+def _strip_json_fence(text: str) -> str:
+    """Unwrap a fenced code block.
+
+    `response_format={"type": "json_object"}` is a request, not a guarantee -
+    Azure OpenAI deployments in particular still answer ```json ... ``` often
+    enough that refusing to unwrap would fail the whole contract over
+    whitespace. Only a full-string fence is unwrapped, so a reply that merely
+    mentions code fences inside a JSON string value is untouched.
+    """
+    match = _JSON_FENCE.match((text or "").strip())
+    return match.group(1) if match else (text or "").strip()
+
+
+def _reject_payload(
+    result: LLMResult,
+    *,
+    contract: str,
+    reason: str,
+    detail: str,
+) -> LLMContractError:
+    """Record an unusable payload and build the typed refusal for the caller."""
+    record_invalid_response(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "contract": contract,
+            "provider": result.provider,
+            "model": result.model,
+            "reason": reason,
+            "detail": detail[:_INVALID_SAMPLE_CHARS],
+            "finish_reason": result.finish_reason,
+            "prompt_tokens": result.usage.prompt_tokens,
+            "completion_tokens": result.usage.completion_tokens,
+            # Redacted: this text came from a provider that was just handed a
+            # ticket, so it can contain customer PII and the audit log is
+            # retained for a year.
+            "response_sample": redact(result.text)[:_INVALID_SAMPLE_CHARS],
+        }
+    )
+    return LLMContractError(
+        f"provider {result.provider!r} broke the {contract!r} contract: {reason}: {detail}",
+        contract=contract,
+        provider=result.provider,
+        model=result.model,
+    )
+
+
+def parse_json_object(
+    result: LLMResult,
+    *,
+    contract: str,
+) -> dict[str, Any]:
+    """Decode a `json_object` completion, refusing anything else.
+
+    The single place a provider reply becomes a Python object. Every caller
+    used to do this itself, which is how three different failure policies grew
+    out of one code path; the refusal is now identical and recorded.
+    """
+    raw = _strip_json_fence(result.text)
+    if not raw:
+        raise _reject_payload(result, contract=contract, reason="empty_response", detail="no text returned")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _reject_payload(
+            result, contract=contract, reason="unparseable_json", detail=str(exc)
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise _reject_payload(
+            result,
+            contract=contract,
+            reason="not_an_object",
+            detail=f"got {type(parsed).__name__}",
+        )
+    return parsed
+
+
+class StructuredCompletion(BaseModel, Generic[ModelT]):
+    """A validated payload plus which provider/model produced it.
+
+    The identity travels with the data because every caller needs it: the
+    draft agent stamps it on the review record, agent assist shows it in the
+    panel header, and triage ignores it. Recovering it from a module global
+    after the fact would be wrong as soon as two calls overlap.
+    """
+
+    data: ModelT
+    provider: str
+    model: str
+
+
+def generate_structured(
+    provider: LLMProvider | str | None = None,
+    prompt: str | None = None,
+    *,
+    system: str | None = None,
+    max_tokens: int = 600,
+    contract: type[ModelT],
+    contract_name: str | None = None,
+    temperature: float = 0.0,
+) -> StructuredCompletion[ModelT]:
+    """Run a `json_object` completion and validate it against `contract`.
+
+    `contract` is a pydantic model whose field types *are* the prompt
+    contract: required fields stay required, enums reject values outside the
+    documented set, and ranges are enforced. `contract_name` labels the audit
+    row and defaults to the model's class name.
+
+    Raises `LLMContractError` - a typed, recorded refusal - rather than
+    returning a half-populated object for the caller to silently substitute.
+    What an unusable payload means is the caller's call: triage falls back to
+    its keyword classifier, the draft agent forces human review, agent assist
+    reports the failure to the agent.
+    """
+    name = contract_name or contract.__name__
+    result = generate(
+        provider,
+        prompt,
+        system=system,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format="json_object",
+    )
+    parsed = parse_json_object(result, contract=name)
+    try:
+        data = contract.model_validate(parsed)
+    except ValidationError as exc:
+        raise _reject_payload(
+            result, contract=name, reason="schema_violation", detail=str(exc)
+        ) from exc
+    return StructuredCompletion(data=data, provider=result.provider, model=result.model)
+
+
 def generate_json(
     provider: LLMProvider | str | None = None,
     prompt: str | None = None,
@@ -578,10 +808,4 @@ def generate_json(
         max_tokens=max_tokens,
         response_format="json_object",
     )
-    try:
-        parsed = json.loads(result.text)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"provider {result.provider!r} returned invalid JSON") from exc
-    if not isinstance(parsed, dict):
-        raise LLMError(f"provider {result.provider!r} returned non-object JSON")
-    return parsed
+    return parse_json_object(result, contract="generate_json")

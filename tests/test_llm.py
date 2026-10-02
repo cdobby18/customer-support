@@ -284,8 +284,11 @@ def test_generate_json_raises_on_invalid_object() -> None:
         def complete(self, messages, **kwargs):
             return llm.LLMResult(text="not json", model="bad", provider="mock")
 
-    with pytest.raises(llm.LLMError, match="invalid JSON"):
+    with pytest.raises(llm.LLMContractError, match="unparseable_json") as excinfo:
         llm.generate_json(BadProvider(), prompt="hi")
+
+    assert excinfo.value.contract == "generate_json"
+    assert excinfo.value.provider == "mock"
 
 
 def test_template_renders_triage_prompt() -> None:
