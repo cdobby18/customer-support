@@ -57,8 +57,7 @@ jobs:
             --ignore-vuln PYSEC-2026-2290 \
             --ignore-vuln PYSEC-2026-3929
         # The six ignores above are the known, currently-unfixable findings.
-        # Every one is documented in markdowns/session.md; the point of
-        # allowlisting them is that any NEW vulnerability still fails CI.
+        # Any NEW vulnerability still fails CI.
         # PYSEC-2026-3721 is pip itself (a build tool, not shipped).
         # The transformers PYSEC-* entries have no stable fixed release - the
         # upstream fixes only exist on 5.x release candidates, so bumping

@@ -40,12 +40,32 @@ md-files/
 check_db.py
 test_semantic.py
 
-# Generated documentation artifact (rebuild via scripts/build_docs_pdf.py)
-docs/AI-Customer-Support-Automation-Documentation.pdf
+# Internal working notes and QA backlog. Private to the maintainer: these are
+# planning documents (roadmap, session notes, runbook drafts), not product
+# documentation, and nothing in app/, tests/ or CI reads them. The README is
+# self-contained instead.
+#
+# Note: gitignoring does NOT untrack anything already committed. A fresh
+# `git rm -r --cached markdowns docs` is required, and history still contains
+# them until the history is rewritten.
+markdowns/
 
-# PDF doc generation tooling (local only; the PDF is regenerated on demand)
-scripts/build_docs_pdf.py
-scripts/render_docs_pdf.mjs
+# Project documentation set. Kept local for the same reason as markdowns/.
+docs/
+
+# Locust load-testing harness. Nothing in CI runs it, and the baseline report
+# is a build artifact rather than source. Same untracking caveat as above.
+load_tests/
+
+# Local helper scripts. Deliberate exceptions below: the files CI invokes must
+# stay tracked or the pipeline breaks on a missing path.
+scripts/*
+!scripts/e2e_postgres_worker.py   # CI postgres job
+!scripts/notify_receiver.py       # CI postgres job
+!scripts/seed_e2e_admin.py        # CI e2e job
+
+# Generated documentation artifact
+docs/AI-Customer-Support-Automation-Documentation.pdf
 
 # Local credential scratch files
 users.txt
